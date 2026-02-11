@@ -36,16 +36,15 @@ Notes
 
 from __future__ import annotations
 
-
+import argparse
+import matplotlib.p
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import re
-import argparse
 import matplotlib.pyplot as plt
 
 try:
@@ -105,7 +104,7 @@ def parse_args() -> argparse.Namespace:
         default="gene_key",
         type=str,
         help="Gene identifier column (default: gene_key).",
-    )
+    )The
     parser.add_argument(
         "--max_intersections",
         required=False,
@@ -589,7 +588,7 @@ def plot_tissue_heatmap_for_shortlist(
         raise ValueError(f"GTEx_Tissue_Medians is missing expected id column: {id_col}")
 
     df = tissue_df.copy()
-    df["Name"] = df["Name"].fillna("").astype(str).str.strip()
+    df[id_col] = df[id_col].fillna("").astype(str).str.strip()
     df["_id_norm"] = df["Name"].str.replace(r"\.\d+$", "", regex=True)
 
     shortlist_norm = (
@@ -623,9 +622,6 @@ def plot_tissue_heatmap_for_shortlist(
 
     # Limit genes
     df_sub = df_sub.head(max_genes)
-
-    # Heatmap plotting (assuming you already import matplotlib)
-    import matplotlib.pyplot as plt
 
     mat = df_sub[keep_tissues].to_numpy()
     plt.figure(figsize=(max(10, len(keep_tissues) * 0.6), max(8, df_sub.shape[0] * 0.25)))
@@ -880,11 +876,6 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 6) Extra visualisations from Genes_Master / GTEx_Tissue_Medians
     # ------------------------------------------------------------------
-    genes_master = pd.read_excel(
-        args.in_xlsx,
-        sheet_name="Genes_Master",
-        dtype=str,
-    )
 
     ranked_tsv = args.out_dir / "top_genes_by_evidence_score.tsv"
     ranked = make_evidence_score_table(
@@ -913,6 +904,17 @@ def main() -> None:
 
     if tissue_medians is not None:
         shortlist_symbols = ranked[args.gene_col].head(50).astype(str).tolist()
+
+        top_symbols = ranked[args.gene_col].head(50).astype(str).str.strip().tolist()
+
+        shortlist_ensembl_versioned = (
+            genes_master.loc[genes_master[args.gene_col].isin(top_symbols), "Name"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .tolist()
+        )
+
 
         gm = genes_master.copy()
         if args.gene_col not in gm.columns and "gene_key" in gm.columns:
