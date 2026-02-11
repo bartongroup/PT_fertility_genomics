@@ -62,6 +62,11 @@ except ImportError as exc:  # pragma: no cover
         "Missing dependency 'matplotlib-venn'. Install with: python -m pip install matplotlib-venn"
     ) from exc
 
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 
 def parse_args() -> argparse.Namespace:
     """
@@ -553,78 +558,84 @@ def plot_tau_vs_testis_tpm(
 
 def plot_tissue_heatmap_for_shortlist(
     tissue_df: pd.DataFrame,
-    shortlist_genes: Sequence[str],
+    shortlist_gene_ids: List[str],
+    id_col: str,
     out_pdf: Path,
     title: str,
-    max_genes: int = 80,
+    max_genes: int = 50,
     top_tissues: int = 15,
 ) -> None:
     """
-    Heatmap of median TPM across tissues for a shortlist of genes.
-
-    This uses GTEx_Tissue_Medians sheet (wide matrix). It selects:
-    - up to max_genes genes (in the order provided)
-    - top_tissues tissues by mean expression across the selected genes
+    Plot a heatmap of GTEx tissue median TPM for a shortlist of genes.
 
     Parameters
     ----------
     tissue_df : pd.DataFrame
-        GTEx tissue medians wide table.
-    shortlist_genes : Sequence[str]
-        Gene keys to include.
+        GTEx tissue median table from the workbook.
+    shortlist_gene_ids : List[str]
+        List of gene identifiers to match (e.g. Ensembl gene IDs).
+    id_col : str
+        Column in tissue_df containing those identifiers (commonly 'Name').
     out_pdf : Path
-        Output pdf.
+        Output pdf path.
     title : str
         Plot title.
-    max_genes : int, optional
-        Maximum number of genes to plot, by default 80.
-    top_tissues : int, optional
-        Number of tissues (columns) to plot, by default 15.
+    max_genes : int
+        Max genes to plot.
+    top_tissues : int
+        Max tissues to plot (highest variance across shortlist).
     """
-    if tissue_df.shape[1] < 3:
-        raise ValueError("GTEx_Tissue_Medians does not look like a wide tissue matrix.")
+    if id_col not in tissue_df.columns:
+        raise ValueError(f"GTEx_Tissue_Medians is missing expected id column: {id_col}")
 
-    # Assume first column is gene identifier
-    gene_id_col = tissue_df.columns[0]
-    mat = tissue_df.copy()
-    mat[gene_id_col] = mat[gene_id_col].fillna("").astype(str).str.strip().str.upper()
+    df = tissue_df.copy()
+    df["Name"] = df["Name"].fillna("").astype(str).str.strip()
+    df["_id_norm"] = df["Name"].str.replace(r"\.\d+$", "", regex=True)
 
-    wanted = [str(g).strip().upper() for g in shortlist_genes if str(g).strip() != ""]
-    wanted = wanted[: int(max_genes)]
+    shortlist_norm = (
+        pd.Series(shortlist_gene_ids, dtype="string")
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.replace(r"\.\d+$", "", regex=True)
+        .tolist()
+    )
 
-    sub = mat[mat[gene_id_col].isin(set(wanted))].copy()
-    if sub.empty:
+    df_sub = df[df["_id_norm"].isin(set(shortlist_norm))].copy()
+    if df_sub.empty:
+        print(f"Shortlist size: {len(shortlist_norm)}")
+        print(f"Tissue IDs size: {df['_id_norm'].nunique()}")
+        print("Example shortlist IDs:", shortlist_norm[:5])
+        print("Example tissue IDs:", df["_id_norm"].head(5).tolist())
         raise ValueError("No shortlist genes matched rows in GTEx_Tissue_Medians.")
 
-    # Coerce tissues to float
-    tissue_cols = [c for c in sub.columns if c != gene_id_col]
+    # Keep only numeric tissue columns (everything except identifiers/description)
+    drop_cols = {id_col, "_id_norm", "Description"}
+    tissue_cols = [c for c in df_sub.columns if c not in drop_cols]
+
+    # Convert to numeric TPM
     for c in tissue_cols:
-        sub[c] = pd.to_numeric(sub[c], errors="coerce").fillna(0.0)
+        df_sub[c] = pd.to_numeric(df_sub[c], errors="coerce").fillna(0.0)
 
-    # Pick top tissues by mean across selected genes
-    means = sub[tissue_cols].mean(axis=0).sort_values(ascending=False)
-    keep_tissues = means.head(int(top_tissues)).index.tolist()
+    # Pick top tissues by variance across shortlist
+    variances = df_sub[tissue_cols].var(axis=0).sort_values(ascending=False)
+    keep_tissues = variances.head(top_tissues).index.tolist()
 
-    # Order genes by mean expression across kept tissues (nice visual)
-    sub["_mean"] = sub[keep_tissues].mean(axis=1)
-    sub = sub.sort_values("_mean", ascending=False).drop(columns=["_mean"])
+    # Limit genes
+    df_sub = df_sub.head(max_genes)
 
-    # Log transform for visual range
-    data = np.log1p(sub[keep_tissues].to_numpy(dtype=float))
-    y_labels = sub[gene_id_col].tolist()
-    x_labels = keep_tissues
+    # Heatmap plotting (assuming you already import matplotlib)
+    import matplotlib.pyplot as plt
 
-    plt.figure(figsize=(max(8, 0.5 * len(x_labels)), max(6, 0.25 * len(y_labels))))
-    plt.imshow(data, aspect="auto")
-    plt.colorbar(label="log1p(median TPM)")
-    plt.yticks(ticks=np.arange(len(y_labels)), labels=y_labels)
-    plt.xticks(ticks=np.arange(len(x_labels)), labels=x_labels, rotation=90)
+    mat = df_sub[keep_tissues].to_numpy()
+    plt.figure(figsize=(max(10, len(keep_tissues) * 0.6), max(8, df_sub.shape[0] * 0.25)))
+    plt.imshow(mat, aspect="auto")
+    plt.yticks(range(df_sub.shape[0]), df_sub[id_col].tolist())
+    plt.xticks(range(len(keep_tissues)), keep_tissues, rotation=90)
     plt.title(title)
     plt.tight_layout()
-    out_pdf.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_pdf, dpi=200)
     plt.close()
-
 
 
 def jaccard_similarity_matrix(df: pd.DataFrame, gene_col: str) -> pd.DataFrame:
@@ -875,15 +886,45 @@ def main() -> None:
         tissue_medians = None
 
     if tissue_medians is not None:
-        shortlist = ranked[args.gene_col].head(50).tolist()
+        shortlist_symbols = ranked[args.gene_col].head(50).astype(str).tolist()
+
+        gm = genes_master.copy()
+        if args.gene_col not in gm.columns and "gene_key" in gm.columns:
+            gm[args.gene_col] = gm["gene_key"]
+
+        gm[args.gene_col] = gm[args.gene_col].fillna("").astype(str).str.strip()
+        gm["ensembl_gene_id"] = gm.get("ensembl_gene_id", "").fillna("").astype(str).str.strip()
+
+        shortlist_map = gm.loc[
+            gm[args.gene_col].isin(shortlist_symbols),
+            ["ensembl_gene_id", args.gene_col],
+        ].drop_duplicates()
+
+        shortlist_ensembl = shortlist_map["ensembl_gene_id"].tolist()
+
+        shortlist_ensembl = [
+                            re.sub(r"\.\d+$", "", str(x).strip())
+                            for x in shortlist_ensembl
+                            if str(x).strip() != ""
+                        ]
+
+
         plot_tissue_heatmap_for_shortlist(
             tissue_df=tissue_medians,
-            shortlist_genes=shortlist,
+            shortlist_gene_ids=shortlist_ensembl,
+            id_col="Name",
             out_pdf=args.out_dir / "heatmap_tissue_medians_top50.pdf",
             title="GTEx tissue median TPM (top 50 by evidence score)",
             max_genes=50,
             top_tissues=15,
         )
+
+        shortlist_map.to_csv(
+            args.out_dir / "top50_symbol_to_ensembl.tsv",
+            sep="\t",
+            index=False,
+        )
+
 
     # ------------------------------------------------------------------
     # 7) log to stdout (handy in cluster logs)
