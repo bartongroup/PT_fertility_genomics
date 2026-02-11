@@ -37,7 +37,6 @@ Notes
 from __future__ import annotations
 
 import argparse
-import matplotlib.p
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
