@@ -536,15 +536,13 @@ def main() -> None:
     )
 
     # Build a compact tier summary sheet (one row per gene, with the tier flags)
-    tier_summary_cols = [
-        "gene_key",
-        "in_hpo_gene_set",
-        "clinvar_best_present",
-        "clinvar_best_pathogenic_present",
-        "clinvar_hc_present",
-        "clinvar_hc_pathogenic_present",
-        "in_testis_high_conf_final",
-    ]
+    def _series_to_bool(series: pd.Series) -> pd.Series:
+        """
+        Convert a pandas Series of mixed values (True/False, 0/1, yes/no, strings)
+        into a boolean Series.
+        """
+        s = series.fillna("").astype(str).str.strip().str.lower()
+        return s.isin({"true", "t", "1", "yes", "y"})
 
     flag_cols = [
         "in_hpo_gene_set",
@@ -555,19 +553,31 @@ def main() -> None:
         "in_testis_high_conf_final",
     ]
 
-    tier_summary = (
-        genes_master[["gene_key"] + flag_cols]
-        .copy()
-    )
+    tier_summary = genes_master[["gene_key"] + flag_cols].copy()
+
+    # Add requested presence flags (from testis integrated table columns)
+    if "prot_present_any" in genes_master.columns:
+        tier_summary["proteomics_present"] = _series_to_bool(genes_master["prot_present_any"])
+    else:
+        tier_summary["proteomics_present"] = False
+
+    if "sperm_present_any" in genes_master.columns:
+        tier_summary["sperm_rnaseq_present"] = _series_to_bool(genes_master["sperm_present_any"])
+    else:
+        tier_summary["sperm_rnaseq_present"] = False
 
     tier_summary["gene_key"] = tier_summary["gene_key"].fillna("").astype(str).str.strip()
     tier_summary = tier_summary[tier_summary["gene_key"] != ""]
 
+    # Ensure the original flags are real booleans
     for col in flag_cols:
         tier_summary[col] = tier_summary[col].fillna(False).astype(bool)
 
+    # Collapse to one row per gene (if any duplicates remain for any reason)
     tier_summary = (
-        tier_summary.groupby("gene_key", as_index=False)[flag_cols]
+        tier_summary.groupby("gene_key", as_index=False)[
+            flag_cols + ["proteomics_present", "sperm_rnaseq_present"]
+        ]
         .any()
     )
 
@@ -625,6 +635,7 @@ def main() -> None:
     )
     write_sheet(wb, "README", readme)
     write_sheet(wb, "Genes_Master", genes_master)
+    write_sheet(wb, "Tier_Summary_With_Omics", tier_summary)
     write_sheet(wb, "ClinVar_Tier_Summary", tier_summary)
     write_sheet(wb, "HPO_Genes_Summary", hpo_summary_df)
     write_sheet(wb, "Testis_HighConfidence_Final", testis_hc_final_df)
