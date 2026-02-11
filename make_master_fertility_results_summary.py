@@ -456,18 +456,47 @@ def main() -> None:
 
 
     # Summarise ClinVar per tier (gene-level)
-    best_gene = summarise_clinvar_by_gene(clinvar_best_df).rename(
-        columns={c: f"clinvar_best__{c}" for c in summarise_clinvar_by_gene(clinvar_best_df).columns if c != "gene_key"}
+
+    # Best (all)
+    best_gene_raw = summarise_clinvar_by_gene(clinvar_best_df)
+    best_gene = best_gene_raw.rename(
+        columns={
+            c: f"clinvar_best__{c}"
+            for c in best_gene_raw.columns
+            if c != "gene_key"
+        }
     )
-    best_path_gene = summarise_clinvar_by_gene(clinvar_best_path_df).rename(
-        columns={c: f"clinvar_best_pathogenic__{c}" for c in summarise_clinvar_by_gene(clinvar_best_path_df).columns if c != "gene_key"}
+
+    # Best (pathogenic only)
+    best_path_gene_raw = summarise_clinvar_by_gene(clinvar_best_path_df)
+    best_path_gene = best_path_gene_raw.rename(
+        columns={
+            c: f"clinvar_best_pathogenic__{c}"
+            for c in best_path_gene_raw.columns
+            if c != "gene_key"
+        }
     )
-    hc_gene = summarise_clinvar_by_gene(clinvar_hc_df).rename(
-        columns={c: f"clinvar_hc__{c}" for c in summarise_clinvar_by_gene(clinvar_hc_df).columns if c != "gene_key"}
+
+    # High confidence (all)
+    hc_gene_raw = summarise_clinvar_by_gene(clinvar_hc_df)
+    hc_gene = hc_gene_raw.rename(
+        columns={
+            c: f"clinvar_hc__{c}"
+            for c in hc_gene_raw.columns
+            if c != "gene_key"
+        }
     )
-    hc_path_gene = summarise_clinvar_by_gene(clinvar_hc_path_df).rename(
-        columns={c: f"clinvar_hc_pathogenic__{c}" for c in summarise_clinvar_by_gene(clinvar_hc_path_df).columns if c != "gene_key"}
+
+    # High confidence (pathogenic only)
+    hc_path_gene_raw = summarise_clinvar_by_gene(clinvar_hc_path_df)
+    hc_path_gene = hc_path_gene_raw.rename(
+        columns={
+            c: f"clinvar_hc_pathogenic__{c}"
+            for c in hc_path_gene_raw.columns
+            if c != "gene_key"
+        }
     )
+
 
     # Genes master: start from the integrated testis table
     genes_master = testis_df.copy()
