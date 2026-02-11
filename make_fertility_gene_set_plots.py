@@ -44,7 +44,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import regex as re
+import re
 import argparse
 import matplotlib.pyplot as plt
 
