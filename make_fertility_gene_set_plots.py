@@ -217,6 +217,7 @@ def plot_set_sizes(set_sizes: pd.DataFrame, out_png: Path) -> None:
     plt.close()
 
 
+
 def upset_plot(
     df: pd.DataFrame,
     gene_col: str,
@@ -228,10 +229,13 @@ def upset_plot(
     """
     Generate an UpSet plot and return the intersection size table.
 
+    This implementation uses subset_size="count" to safely handle non-unique
+    membership patterns (many genes share the same combination of flags).
+
     Parameters
     ----------
     df : pd.DataFrame
-        Flags table.
+        Flags table (one row per gene, boolean flag columns).
     gene_col : str
         Gene identifier column.
     flag_cols : Sequence[str]
@@ -246,16 +250,25 @@ def upset_plot(
     Returns
     -------
     pd.DataFrame
-        Intersection counts as a DataFrame.
+        Intersection counts table (top intersections).
     """
     work = df[[gene_col] + list(flag_cols)].copy()
-    indicators = work[list(flag_cols)].astype(bool)
 
-    upset_data = from_indicators(indicators=indicators, data=work[gene_col])
+    # Ensure booleans (defensive)
+    for c in flag_cols:
+        work[c] = work[c].fillna(False).astype(bool)
+
+    # Build a Series of 1s indexed by the membership pattern.
+    # Duplicated membership patterns are fine when subset_size="count".
+    upset_series = (
+        work.assign(_count=1)
+        .set_index(list(flag_cols))["_count"]
+    )
 
     plt.figure()
     upset = UpSet(
-        upset_data,
+        upset_series,
+        subset_size="count",
         show_counts=True,
         sort_by="cardinality",
         intersection_plot_elements=max_intersections,
@@ -266,14 +279,19 @@ def upset_plot(
     plt.savefig(out_png, dpi=200)
     plt.close()
 
-    # Build intersection count table
-    counts = upset_data.groupby(level=list(range(len(flag_cols)))).size()
+    # Intersection counts table (top N)
+    counts = upset_series.groupby(level=list(range(len(flag_cols)))).sum()
     counts = counts.sort_values(ascending=False).head(max_intersections)
+
     out_rows: List[Dict[str, object]] = []
     for idx, n in counts.items():
-        # idx is a tuple of booleans in the same order as flag_cols
         included = [flag_cols[i] for i, v in enumerate(idx) if bool(v)]
-        out_rows.append({"intersection": "&".join(included) if included else "(none)", "n_genes": int(n)})
+        out_rows.append(
+            {
+                "intersection": "&".join(included) if included else "(none)",
+                "n_genes": int(n),
+            }
+        )
 
     return pd.DataFrame(out_rows)
 
