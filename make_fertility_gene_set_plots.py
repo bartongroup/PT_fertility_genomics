@@ -489,7 +489,7 @@ def assign_clinvar_tier_label(df: pd.DataFrame) -> pd.Series:
 def plot_tau_vs_testis_tpm(
     genes_df: pd.DataFrame,
     gene_col: str,
-    out_png: Path,
+    out_pdf: Path,
     title: str,
 ) -> None:
     """
@@ -501,8 +501,8 @@ def plot_tau_vs_testis_tpm(
         Genes_Master table.
     gene_col : str
         Gene key column.
-    out_png : Path
-        Output PNG path.
+    out_pdf : Path
+        Output pdf path.
     title : str
         Plot title.
     """
@@ -546,15 +546,15 @@ def plot_tau_vs_testis_tpm(
     plt.title(title)
     plt.legend(loc="best", frameon=False)
     plt.tight_layout()
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_png, dpi=200)
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_pdf, dpi=200)
     plt.close()
 
 
 def plot_tissue_heatmap_for_shortlist(
     tissue_df: pd.DataFrame,
     shortlist_genes: Sequence[str],
-    out_png: Path,
+    out_pdf: Path,
     title: str,
     max_genes: int = 80,
     top_tissues: int = 15,
@@ -572,8 +572,8 @@ def plot_tissue_heatmap_for_shortlist(
         GTEx tissue medians wide table.
     shortlist_genes : Sequence[str]
         Gene keys to include.
-    out_png : Path
-        Output PNG.
+    out_pdf : Path
+        Output pdf.
     title : str
         Plot title.
     max_genes : int, optional
@@ -621,8 +621,8 @@ def plot_tissue_heatmap_for_shortlist(
     plt.xticks(ticks=np.arange(len(x_labels)), labels=x_labels, rotation=90)
     plt.title(title)
     plt.tight_layout()
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_png, dpi=200)
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_pdf, dpi=200)
     plt.close()
 
 
@@ -861,7 +861,7 @@ def main() -> None:
     plot_tau_vs_testis_tpm(
         genes_df=genes_master,
         gene_col=args.gene_col,
-        out_png=args.out_dir / "tau_vs_testis_median_tpm_by_clinvar_tier.png",
+        out_pdf=args.out_dir / "tau_vs_testis_median_tpm_by_clinvar_tier.pdf",
         title="Tau vs testis median TPM (colour by ClinVar tier)",
     )
 
@@ -879,14 +879,14 @@ def main() -> None:
         plot_tissue_heatmap_for_shortlist(
             tissue_df=tissue_medians,
             shortlist_genes=shortlist,
-            out_png=args.out_dir / "heatmap_tissue_medians_top50.png",
+            out_pdf=args.out_dir / "heatmap_tissue_medians_top50.pdf",
             title="GTEx tissue median TPM (top 50 by evidence score)",
             max_genes=50,
             top_tissues=15,
         )
 
     # ------------------------------------------------------------------
-    # 7) Quick log to stdout (handy in cluster logs)
+    # 7) log to stdout (handy in cluster logs)
     # ------------------------------------------------------------------
     print(f"Loaded genes: {df.shape[0]}")
     print(f"Flags: {len([c for c in df.columns if c != args.gene_col])}")
