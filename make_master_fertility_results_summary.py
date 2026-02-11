@@ -273,6 +273,26 @@ def summarise_clinvar_by_gene(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def drop_empty_gene_keys(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Drop rows where gene_key is missing/blank.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame with gene_key.
+
+    Returns
+    -------
+    pd.DataFrame
+        Filtered DataFrame.
+    """
+    out = df.copy()
+    out["gene_key"] = out["gene_key"].fillna("").astype(str).str.strip()
+    out = out[out["gene_key"] != ""]
+    return out
+
+
 def write_sheet(wb: Workbook, title: str, df: pd.DataFrame) -> None:
     """
     Write a DataFrame to an Excel worksheet with basic formatting.
@@ -424,6 +444,17 @@ def main() -> None:
         candidate_cols=["gene_symbol_norm", "hgnc_symbol_norm", "hgnc_symbol"],
     )
 
+    testis_df = drop_empty_gene_keys(df=testis_df)
+    hpo_summary_df = drop_empty_gene_keys(df=hpo_summary_df)
+    hpo_symbols_df = drop_empty_gene_keys(df=hpo_symbols_df)
+    clinvar_best_df = drop_empty_gene_keys(df=clinvar_best_df)
+    clinvar_best_path_df = drop_empty_gene_keys(df=clinvar_best_path_df)
+    clinvar_hc_df = drop_empty_gene_keys(df=clinvar_hc_df)
+    clinvar_hc_path_df = drop_empty_gene_keys(df=clinvar_hc_path_df)
+    clinvar_hc_gene_summary_df = drop_empty_gene_keys(df=clinvar_hc_gene_summary_df)
+    testis_hc_final_df = drop_empty_gene_keys(df=testis_hc_final_df)
+
+
     # Summarise ClinVar per tier (gene-level)
     best_gene = summarise_clinvar_by_gene(clinvar_best_df).rename(
         columns={c: f"clinvar_best__{c}" for c in summarise_clinvar_by_gene(clinvar_best_df).columns if c != "gene_key"}
@@ -485,7 +516,32 @@ def main() -> None:
         "clinvar_hc_pathogenic_present",
         "in_testis_high_conf_final",
     ]
-    tier_summary = genes_master[tier_summary_cols].copy()
+
+    flag_cols = [
+        "in_hpo_gene_set",
+        "clinvar_best_present",
+        "clinvar_best_pathogenic_present",
+        "clinvar_hc_present",
+        "clinvar_hc_pathogenic_present",
+        "in_testis_high_conf_final",
+    ]
+
+    tier_summary = (
+        genes_master[["gene_key"] + flag_cols]
+        .copy()
+    )
+
+    tier_summary["gene_key"] = tier_summary["gene_key"].fillna("").astype(str).str.strip()
+    tier_summary = tier_summary[tier_summary["gene_key"] != ""]
+
+    for col in flag_cols:
+        tier_summary[col] = tier_summary[col].fillna(False).astype(bool)
+
+    tier_summary = (
+        tier_summary.groupby("gene_key", as_index=False)[flag_cols]
+        .any()
+    )
+
 
     prot_anchor = "prot_present_fraction"
     if "proteomics_evidence_level" in genes_master.columns and prot_anchor in genes_master.columns:
