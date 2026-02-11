@@ -44,7 +44,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
+import regex as re
 import argparse
 import matplotlib.pyplot as plt
 
@@ -759,6 +759,32 @@ def main() -> None:
         gene_col=args.gene_col,
     )
 
+
+    genes_master = pd.read_excel(
+    io=args.in_xlsx,
+    sheet_name="Genes_Master",
+    dtype=str,
+    )
+
+    genes_master["gene_key"] = genes_master["gene_key"].fillna("").astype(str).str.strip()
+    genes_master["Name"] = genes_master["Name"].fillna("").astype(str).str.strip()
+
+    shortlist_symbols = set(
+        df.loc[df["in_testis_high_conf_final"].astype(bool), args.gene_col]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    shortlist_ensembl_versioned = (
+        genes_master.loc[genes_master["gene_key"].isin(shortlist_symbols), "Name"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+
+
     # ------------------------------------------------------------------
     # 2) Set sizes + set size plot
     # ------------------------------------------------------------------
@@ -911,7 +937,7 @@ def main() -> None:
 
         plot_tissue_heatmap_for_shortlist(
             tissue_df=tissue_medians,
-            shortlist_gene_ids=shortlist_ensembl,
+            shortlist_gene_ids=shortlist_ensembl_versioned,
             id_col="Name",
             out_pdf=args.out_dir / "heatmap_tissue_medians_top50.pdf",
             title="GTEx tissue median TPM (top 50 by evidence score)",
