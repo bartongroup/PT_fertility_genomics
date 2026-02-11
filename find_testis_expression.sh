@@ -110,8 +110,9 @@ test -s "${HPO_DIR}/genes_to_phenotype.txt"
 ###############################################################################
 # If conda activation is required in your cluster job shell, keep this.
 # If you run inside an already-activated env, you can comment it out.
-source "${HOME}/miniconda3/etc/profile.d/conda.sh"
-conda activate python3.9
+
+#source "${HOME}/miniconda3/etc/profile.d/conda.sh"
+#conda activate python3.9
 
 ###############################################################################
 # 1) GTEx testis specificity ranking
