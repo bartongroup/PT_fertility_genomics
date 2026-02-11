@@ -23,6 +23,8 @@ fi
 
 echo "Starting downloads..."
 
+echo "some of these fail and need to be downloaded manually -  sorry. See the script for details."
+
 ###############################################################################
 # GTEx
 ###############################################################################
