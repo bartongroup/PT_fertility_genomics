@@ -152,6 +152,63 @@ def ensure_gene_key(df: pd.DataFrame, candidate_cols: Iterable[str]) -> pd.DataF
     )
 
 
+def classify_proteomics_evidence(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add a derived proteomics evidence level column based on proteomics support.
+
+    Rules
+    -----
+    - None: prot_present_any is False/empty.
+    - Strong: present and (unique peptides >= 2) and (coverage >= 10).
+    - Detected: present but does not meet Strong thresholds.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Gene-level DataFrame containing proteomics columns:
+        prot_present_any, prot_unique_peptides_max, prot_coverage_pct_max.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of df with proteomics_evidence_level column added.
+    """
+    out = df.copy()
+
+    def _to_float(value: object) -> float:
+        if value is None:
+            return 0.0
+        s = str(value).strip()
+        if s == "" or s.upper() == "NA":
+            return 0.0
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    def _to_bool(value: object) -> bool:
+        if value is None:
+            return False
+        s = str(value).strip().lower()
+        return s in {"true", "t", "1", "yes", "y"}
+
+    levels: List[str] = []
+    for _, row in out.iterrows():
+        present = _to_bool(row.get("prot_present_any", ""))
+        uniq = _to_float(row.get("prot_unique_peptides_max", ""))
+        cov = _to_float(row.get("prot_coverage_pct_max", ""))
+
+        if not present:
+            levels.append("None")
+        elif uniq >= 2.0 and cov >= 10.0:
+            levels.append("Strong")
+        else:
+            levels.append("Detected")
+
+    out["proteomics_evidence_level"] = levels
+    return out
+
+
 def summarise_clinvar_by_gene(df: pd.DataFrame) -> pd.DataFrame:
     """
     Summarise ClinVar variant rows to gene-level counts.
@@ -392,6 +449,12 @@ def main() -> None:
     genes_master["clinvar_hc_pathogenic_present"] = genes_master["gene_key"].isin(set(clinvar_hc_path_df["gene_key"]))
     genes_master["in_testis_high_conf_final"] = genes_master["gene_key"].isin(set(testis_hc_final_df["gene_key"]))
 
+    # Derived summary column for presentation-friendly proteomics interpretation
+
+    genes_master = classify_proteomics_evidence(df=genes_master)
+
+
+
     # Merge HPO gene summary fields (prefixed)
     hpo_cols = [c for c in hpo_summary_df.columns if c not in ["gene_key"]]
     hpo_ren = {c: f"hpo__{c}" for c in hpo_cols}
@@ -423,6 +486,15 @@ def main() -> None:
         "in_testis_high_conf_final",
     ]
     tier_summary = genes_master[tier_summary_cols].copy()
+
+    prot_anchor = "prot_present_fraction"
+    if "proteomics_evidence_level" in genes_master.columns and prot_anchor in genes_master.columns:
+        cols = list(genes_master.columns)
+        cols.remove("proteomics_evidence_level")
+        insert_at = cols.index(prot_anchor) + 1
+        cols.insert(insert_at, "proteomics_evidence_level")
+        genes_master = genes_master[cols]
+
 
     # Workbook
     wb = Workbook()
