@@ -636,7 +636,6 @@ def main() -> None:
     write_sheet(wb, "README", readme)
     write_sheet(wb, "Genes_Master", genes_master)
     write_sheet(wb, "Tier_Summary_With_Omics", tier_summary)
-    write_sheet(wb, "ClinVar_Tier_Summary", tier_summary)
     write_sheet(wb, "HPO_Genes_Summary", hpo_summary_df)
     write_sheet(wb, "Testis_HighConfidence_Final", testis_hc_final_df)
 
