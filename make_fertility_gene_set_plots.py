@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
         default="gene_key",
         type=str,
         help="Gene identifier column (default: gene_key).",
-    )The
+    )
     parser.add_argument(
         "--max_intersections",
         required=False,
