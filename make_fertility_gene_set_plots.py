@@ -36,11 +36,16 @@ Notes
 
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
 
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+
+import argparse
 import matplotlib.pyplot as plt
 
 try:
@@ -296,6 +301,332 @@ def upset_plot(
     return pd.DataFrame(out_rows)
 
 
+
+def _series_to_bool(series: pd.Series) -> pd.Series:
+    """
+    Convert a pandas Series of mixed values (True/False, 0/1, yes/no, strings)
+    into a boolean Series.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Input Series.
+
+    Returns
+    -------
+    pd.Series
+        Boolean Series.
+    """
+    s = series.fillna("").astype(str).str.strip().str.lower()
+    return s.isin({"true", "t", "1", "yes", "y"})
+
+
+def _safe_float(series: pd.Series) -> pd.Series:
+    """
+    Coerce a Series to float safely (invalid parses become NaN).
+
+    Parameters
+    ----------
+    series : pd.Series
+        Input Series.
+
+    Returns
+    -------
+    pd.Series
+        Float Series.
+    """
+    return pd.to_numeric(series, errors="coerce")
+
+
+def make_evidence_score_table(
+    tier_df: pd.DataFrame,
+    genes_df: pd.DataFrame,
+    gene_col: str,
+    out_tsv: Path,
+    top_n: int = 200,
+) -> pd.DataFrame:
+    """
+    Create a ranked 'top genes' table using a simple evidence score.
+
+    Scoring (default, simple and explainable)
+    ----------------------------------------
+    - in_hpo_gene_set: 1
+    - sperm_rnaseq_present: 1
+    - proteomics_present: 1
+    - clinvar_best_present: 1
+    - clinvar_best_pathogenic_present: 2
+    - clinvar_hc_present: 2
+    - clinvar_hc_pathogenic_present: 3
+    - in_testis_high_conf_final: 2
+
+    Parameters
+    ----------
+    tier_df : pd.DataFrame
+        Tier sheet with boolean flags.
+    genes_df : pd.DataFrame
+        Genes_Master sheet with tau/testis TPM etc.
+    gene_col : str
+        Column name for gene key in both tables (usually 'gene_key').
+    out_tsv : Path
+        Output TSV path.
+    top_n : int, optional
+        Keep top N genes in the output table, by default 200.
+
+    Returns
+    -------
+    pd.DataFrame
+        Ranked evidence table.
+    """
+    flags = [
+        "in_hpo_gene_set",
+        "sperm_rnaseq_present",
+        "proteomics_present",
+        "clinvar_best_present",
+        "clinvar_best_pathogenic_present",
+        "clinvar_hc_present",
+        "clinvar_hc_pathogenic_present",
+        "in_testis_high_conf_final",
+    ]
+    weights: Dict[str, int] = {
+        "in_hpo_gene_set": 1,
+        "sperm_rnaseq_present": 1,
+        "proteomics_present": 1,
+        "clinvar_best_present": 1,
+        "clinvar_best_pathogenic_present": 2,
+        "clinvar_hc_present": 2,
+        "clinvar_hc_pathogenic_present": 3,
+        "in_testis_high_conf_final": 2,
+    }
+
+    work = tier_df[[gene_col] + [c for c in flags if c in tier_df.columns]].copy()
+    work[gene_col] = work[gene_col].fillna("").astype(str).str.strip()
+    work = work[work[gene_col] != ""].drop_duplicates(subset=[gene_col])
+
+    for c in flags:
+        if c not in work.columns:
+            work[c] = False
+        work[c] = _series_to_bool(work[c])
+
+    score = np.zeros(len(work), dtype=int)
+    for c in flags:
+        score += work[c].astype(int).values * int(weights[c])
+    work["evidence_score"] = score
+
+    # Bring in tau/testis TPM for convenience in the ranked table
+    cols_from_genes = [gene_col]
+    for c in ["tau", "target_median_tpm", "sperm_tpm_median", "sperm_tpm_mean"]:
+        if c in genes_df.columns:
+            cols_from_genes.append(c)
+
+    merged = work.merge(genes_df[cols_from_genes].drop_duplicates(subset=[gene_col]),
+                        on=gene_col, how="left")
+
+    if "tau" in merged.columns:
+        merged["tau"] = _safe_float(merged["tau"])
+    if "target_median_tpm" in merged.columns:
+        merged["target_median_tpm"] = _safe_float(merged["target_median_tpm"])
+
+    merged = merged.sort_values(
+        by=["evidence_score", "tau", "target_median_tpm"],
+        ascending=[False, False, False],
+        na_position="last",
+    )
+
+    merged_top = merged.head(int(top_n)).copy()
+    out_tsv.parent.mkdir(parents=True, exist_ok=True)
+    merged_top.to_csv(out_tsv, sep="\t", index=False)
+
+    return merged_top
+
+
+def assign_clinvar_tier_label(df: pd.DataFrame) -> pd.Series:
+    """
+    Assign a single ClinVar tier label per gene from boolean flags.
+
+    Priority (highest to lowest)
+    ----------------------------
+    1) HC pathogenic
+    2) HC any
+    3) Best pathogenic
+    4) Best any
+    5) None
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing ClinVar boolean flags.
+
+    Returns
+    -------
+    pd.Series
+        Tier label per row.
+    """
+    for col in [
+        "clinvar_hc_pathogenic_present",
+        "clinvar_hc_present",
+        "clinvar_best_pathogenic_present",
+        "clinvar_best_present",
+    ]:
+        if col not in df.columns:
+            df[col] = False
+        df[col] = _series_to_bool(df[col])
+
+    labels: List[str] = []
+    for _, row in df.iterrows():
+        if bool(row["clinvar_hc_pathogenic_present"]):
+            labels.append("ClinVar HC pathogenic")
+        elif bool(row["clinvar_hc_present"]):
+            labels.append("ClinVar HC")
+        elif bool(row["clinvar_best_pathogenic_present"]):
+            labels.append("ClinVar best pathogenic")
+        elif bool(row["clinvar_best_present"]):
+            labels.append("ClinVar best")
+        else:
+            labels.append("No ClinVar tier")
+    return pd.Series(labels, index=df.index)
+
+
+def plot_tau_vs_testis_tpm(
+    genes_df: pd.DataFrame,
+    gene_col: str,
+    out_png: Path,
+    title: str,
+) -> None:
+    """
+    Scatter plot of tau vs testis median TPM, coloured by ClinVar tier.
+
+    Parameters
+    ----------
+    genes_df : pd.DataFrame
+        Genes_Master table.
+    gene_col : str
+        Gene key column.
+    out_png : Path
+        Output PNG path.
+    title : str
+        Plot title.
+    """
+    required = {"tau", "target_median_tpm", gene_col}
+    missing = [c for c in required if c not in genes_df.columns]
+    if missing:
+        raise ValueError(f"Genes_Master missing required columns: {missing}")
+
+    work = genes_df[[gene_col, "tau", "target_median_tpm",
+                     "clinvar_best_present", "clinvar_best_pathogenic_present",
+                     "clinvar_hc_present", "clinvar_hc_pathogenic_present"]].copy()
+
+    work[gene_col] = work[gene_col].fillna("").astype(str).str.strip()
+    work = work[work[gene_col] != ""].drop_duplicates(subset=[gene_col])
+
+    work["tau"] = _safe_float(work["tau"])
+    work["target_median_tpm"] = _safe_float(work["target_median_tpm"])
+    work = work.dropna(subset=["tau", "target_median_tpm"])
+
+    work["clinvar_tier"] = assign_clinvar_tier_label(work)
+
+    # Plot
+    plt.figure()
+    categories = [
+        "ClinVar HC pathogenic",
+        "ClinVar HC",
+        "ClinVar best pathogenic",
+        "ClinVar best",
+        "No ClinVar tier",
+    ]
+
+    for cat in categories:
+        sub = work[work["clinvar_tier"] == cat]
+        if sub.empty:
+            continue
+        plt.scatter(sub["tau"], sub["target_median_tpm"], label=cat, alpha=0.7)
+
+    plt.xlabel("Tau (testis specificity)")
+    plt.ylabel("Testis median TPM")
+    plt.yscale("log")
+    plt.title(title)
+    plt.legend(loc="best", frameon=False)
+    plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_png, dpi=200)
+    plt.close()
+
+
+def plot_tissue_heatmap_for_shortlist(
+    tissue_df: pd.DataFrame,
+    shortlist_genes: Sequence[str],
+    out_png: Path,
+    title: str,
+    max_genes: int = 80,
+    top_tissues: int = 15,
+) -> None:
+    """
+    Heatmap of median TPM across tissues for a shortlist of genes.
+
+    This uses GTEx_Tissue_Medians sheet (wide matrix). It selects:
+    - up to max_genes genes (in the order provided)
+    - top_tissues tissues by mean expression across the selected genes
+
+    Parameters
+    ----------
+    tissue_df : pd.DataFrame
+        GTEx tissue medians wide table.
+    shortlist_genes : Sequence[str]
+        Gene keys to include.
+    out_png : Path
+        Output PNG.
+    title : str
+        Plot title.
+    max_genes : int, optional
+        Maximum number of genes to plot, by default 80.
+    top_tissues : int, optional
+        Number of tissues (columns) to plot, by default 15.
+    """
+    if tissue_df.shape[1] < 3:
+        raise ValueError("GTEx_Tissue_Medians does not look like a wide tissue matrix.")
+
+    # Assume first column is gene identifier
+    gene_id_col = tissue_df.columns[0]
+    mat = tissue_df.copy()
+    mat[gene_id_col] = mat[gene_id_col].fillna("").astype(str).str.strip().str.upper()
+
+    wanted = [str(g).strip().upper() for g in shortlist_genes if str(g).strip() != ""]
+    wanted = wanted[: int(max_genes)]
+
+    sub = mat[mat[gene_id_col].isin(set(wanted))].copy()
+    if sub.empty:
+        raise ValueError("No shortlist genes matched rows in GTEx_Tissue_Medians.")
+
+    # Coerce tissues to float
+    tissue_cols = [c for c in sub.columns if c != gene_id_col]
+    for c in tissue_cols:
+        sub[c] = pd.to_numeric(sub[c], errors="coerce").fillna(0.0)
+
+    # Pick top tissues by mean across selected genes
+    means = sub[tissue_cols].mean(axis=0).sort_values(ascending=False)
+    keep_tissues = means.head(int(top_tissues)).index.tolist()
+
+    # Order genes by mean expression across kept tissues (nice visual)
+    sub["_mean"] = sub[keep_tissues].mean(axis=1)
+    sub = sub.sort_values("_mean", ascending=False).drop(columns=["_mean"])
+
+    # Log transform for visual range
+    data = np.log1p(sub[keep_tissues].to_numpy(dtype=float))
+    y_labels = sub[gene_id_col].tolist()
+    x_labels = keep_tissues
+
+    plt.figure(figsize=(max(8, 0.5 * len(x_labels)), max(6, 0.25 * len(y_labels))))
+    plt.imshow(data, aspect="auto")
+    plt.colorbar(label="log1p(median TPM)")
+    plt.yticks(ticks=np.arange(len(y_labels)), labels=y_labels)
+    plt.xticks(ticks=np.arange(len(x_labels)), labels=x_labels, rotation=90)
+    plt.title(title)
+    plt.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_png, dpi=200)
+    plt.close()
+
+
+
 def jaccard_similarity_matrix(df: pd.DataFrame, gene_col: str) -> pd.DataFrame:
     """
     Compute pairwise Jaccard similarity between all boolean flag columns.
@@ -392,20 +723,34 @@ def plot_venn3_from_flags(
     plt.close()
 
 
+
 def main() -> None:
     """
     Entry point.
+
+    This main function:
+    1) Loads the Tier_Summary flags table (boolean membership per gene).
+    2) Produces set size summaries, UpSet plots, Venn diagrams, and Jaccard heatmap.
+    3) Additionally reads Genes_Master (and optionally GTEx_Tissue_Medians) to make:
+       - top genes table ranked by a simple evidence score
+       - tau vs testis TPM scatter coloured by ClinVar tier
+       - tissue median TPM heatmap for the top-ranked shortlist (if available)
     """
     args = parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    # ------------------------------------------------------------------
+    # 1) Load gene-set flags (Tier summary sheet)
+    # ------------------------------------------------------------------
     df = load_flags_table(
         in_xlsx=args.in_xlsx,
         sheet_name=args.sheet_name,
         gene_col=args.gene_col,
     )
 
-    # Set sizes
+    # ------------------------------------------------------------------
+    # 2) Set sizes + set size plot
+    # ------------------------------------------------------------------
     set_sizes = write_set_sizes(
         df=df,
         gene_col=args.gene_col,
@@ -413,7 +758,9 @@ def main() -> None:
     )
     plot_set_sizes(set_sizes=set_sizes, out_pdf=args.out_dir / "set_sizes.pdf")
 
-    # UpSet: all flags
+    # ------------------------------------------------------------------
+    # 3) UpSet plots
+    # ------------------------------------------------------------------
     all_flag_cols = [c for c in df.columns if c != args.gene_col]
     intersections_all = upset_plot(
         df=df,
@@ -423,9 +770,12 @@ def main() -> None:
         title="UpSet: all evidence flags",
         max_intersections=args.max_intersections,
     )
-    intersections_all.to_csv(args.out_dir / "intersection_counts_top.tsv", sep="\t", index=False)
+    intersections_all.to_csv(
+        args.out_dir / "intersection_counts_top.tsv",
+        sep="\t",
+        index=False,
+    )
 
-    # UpSet: core subset (more presentation-friendly)
     core_cols = [
         "in_hpo_gene_set",
         "clinvar_hc_pathogenic_present",
@@ -444,8 +794,17 @@ def main() -> None:
             max_intersections=args.max_intersections,
         )
 
-    # Venn diagrams (only if all three columns exist)
-    if all(c in df.columns for c in ["in_hpo_gene_set", "clinvar_hc_pathogenic_present", "in_testis_high_conf_final"]):
+    # ------------------------------------------------------------------
+    # 4) Venn diagrams
+    # ------------------------------------------------------------------
+    if all(
+        c in df.columns
+        for c in [
+            "in_hpo_gene_set",
+            "clinvar_hc_pathogenic_present",
+            "in_testis_high_conf_final",
+        ]
+    ):
         plot_venn3_from_flags(
             df=df,
             gene_col=args.gene_col,
@@ -456,7 +815,14 @@ def main() -> None:
             title="Venn: HPO vs ClinVar HC pathogenic vs Testis HC final",
         )
 
-    if all(c in df.columns for c in ["in_testis_high_conf_final", "proteomics_present", "sperm_rnaseq_present"]):
+    if all(
+        c in df.columns
+        for c in [
+            "in_testis_high_conf_final",
+            "proteomics_present",
+            "sperm_rnaseq_present",
+        ]
+    ):
         plot_venn3_from_flags(
             df=df,
             gene_col=args.gene_col,
@@ -467,12 +833,61 @@ def main() -> None:
             title="Venn: Testis HC final vs Proteomics vs Sperm RNA-seq",
         )
 
-    # Pairwise overlap heatmap
+    # ------------------------------------------------------------------
+    # 5) Pairwise overlap heatmap
+    # ------------------------------------------------------------------
     jac = jaccard_similarity_matrix(df=df, gene_col=args.gene_col)
     plot_jaccard_heatmap(mat=jac, out_pdf=args.out_dir / "jaccard_heatmap.pdf")
     jac.to_csv(args.out_dir / "jaccard_matrix.tsv", sep="\t")
 
-    # Quick log to stdout (handy in cluster logs)
+    # ------------------------------------------------------------------
+    # 6) Extra visualisations from Genes_Master / GTEx_Tissue_Medians
+    # ------------------------------------------------------------------
+    genes_master = pd.read_excel(
+        args.in_xlsx,
+        sheet_name="Genes_Master",
+        dtype=str,
+    )
+
+    ranked_tsv = args.out_dir / "top_genes_by_evidence_score.tsv"
+    ranked = make_evidence_score_table(
+        tier_df=df,
+        genes_df=genes_master,
+        gene_col=args.gene_col,
+        out_tsv=ranked_tsv,
+        top_n=200,
+    )
+
+    plot_tau_vs_testis_tpm(
+        genes_df=genes_master,
+        gene_col=args.gene_col,
+        out_png=args.out_dir / "tau_vs_testis_median_tpm_by_clinvar_tier.png",
+        title="Tau vs testis median TPM (colour by ClinVar tier)",
+    )
+
+    try:
+        tissue_medians = pd.read_excel(
+            args.in_xlsx,
+            sheet_name="GTEx_Tissue_Medians",
+            dtype=str,
+        )
+    except ValueError:
+        tissue_medians = None
+
+    if tissue_medians is not None:
+        shortlist = ranked[args.gene_col].head(50).tolist()
+        plot_tissue_heatmap_for_shortlist(
+            tissue_df=tissue_medians,
+            shortlist_genes=shortlist,
+            out_png=args.out_dir / "heatmap_tissue_medians_top50.png",
+            title="GTEx tissue median TPM (top 50 by evidence score)",
+            max_genes=50,
+            top_tissues=15,
+        )
+
+    # ------------------------------------------------------------------
+    # 7) Quick log to stdout (handy in cluster logs)
+    # ------------------------------------------------------------------
     print(f"Loaded genes: {df.shape[0]}")
     print(f"Flags: {len([c for c in df.columns if c != args.gene_col])}")
     print(f"Wrote outputs to: {args.out_dir}")
@@ -480,3 +895,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
