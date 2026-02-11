@@ -11,16 +11,16 @@ master workbook builder, and then visualise the overlap between evidence sets.
 
 Outputs
 -------
-- UpSet plots as PNG:
-  - upset_all_flags.png
-  - upset_core_flags.png
-- Venn diagrams as PNG (3-way, where possible):
-  - venn_hpo_clinvarhcpath_testishc.png
-  - venn_testishc_proteomics_sperm.png
+- UpSet plots as pdf:
+  - upset_all_flags.pdf
+  - upset_core_flags.pdf
+- Venn diagrams as pdf (3-way, where possible):
+  - venn_hpo_clinvarhcpath_testishc.pdf
+  - venn_testishc_proteomics_sperm.pdf
 - Bar chart of set sizes:
-  - set_sizes.png
+  - set_sizes.pdf
 - Pairwise Jaccard heatmap:
-  - jaccard_heatmap.png
+  - jaccard_heatmap.pdf
 - TSV summaries:
   - set_sizes.tsv
   - intersection_counts_top.tsv
@@ -196,7 +196,7 @@ def write_set_sizes(df: pd.DataFrame, gene_col: str, out_path: Path) -> pd.DataF
     return out
 
 
-def plot_set_sizes(set_sizes: pd.DataFrame, out_png: Path) -> None:
+def plot_set_sizes(set_sizes: pd.DataFrame, out_pdf: Path) -> None:
     """
     Plot bar chart of set sizes.
 
@@ -204,8 +204,8 @@ def plot_set_sizes(set_sizes: pd.DataFrame, out_png: Path) -> None:
     ----------
     set_sizes : pd.DataFrame
         DataFrame with columns: set, n_genes.
-    out_png : Path
-        Output PNG path.
+    out_pdf : Path
+        Output pdf path.
     """
     plt.figure()
     plt.bar(set_sizes["set"], set_sizes["n_genes"])
@@ -213,7 +213,7 @@ def plot_set_sizes(set_sizes: pd.DataFrame, out_png: Path) -> None:
     plt.ylabel("Number of genes")
     plt.title("Evidence set sizes")
     plt.tight_layout()
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_pdf, dpi=200)
     plt.close()
 
 
@@ -222,7 +222,7 @@ def upset_plot(
     df: pd.DataFrame,
     gene_col: str,
     flag_cols: Sequence[str],
-    out_png: Path,
+    out_pdf: Path,
     title: str,
     max_intersections: int,
 ) -> pd.DataFrame:
@@ -240,8 +240,8 @@ def upset_plot(
         Gene identifier column.
     flag_cols : Sequence[str]
         Columns to include in the UpSet plot.
-    out_png : Path
-        Output PNG path.
+    out_pdf : Path
+        Output pdf path.
     title : str
         Plot title.
     max_intersections : int
@@ -276,7 +276,7 @@ def upset_plot(
     upset.plot()
     plt.suptitle(title)
     plt.tight_layout()
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_pdf, dpi=200)
     plt.close()
 
     # Intersection counts table (top N)
@@ -325,7 +325,7 @@ def jaccard_similarity_matrix(df: pd.DataFrame, gene_col: str) -> pd.DataFrame:
     return mat
 
 
-def plot_jaccard_heatmap(mat: pd.DataFrame, out_png: Path) -> None:
+def plot_jaccard_heatmap(mat: pd.DataFrame, out_pdf: Path) -> None:
     """
     Plot a pairwise Jaccard similarity heatmap.
 
@@ -333,8 +333,8 @@ def plot_jaccard_heatmap(mat: pd.DataFrame, out_png: Path) -> None:
     ----------
     mat : pd.DataFrame
         Jaccard similarity matrix.
-    out_png : Path
-        Output PNG path.
+    out_pdf : Path
+        Output pdf path.
     """
     plt.figure()
     plt.imshow(mat.values, aspect="auto")
@@ -343,7 +343,7 @@ def plot_jaccard_heatmap(mat: pd.DataFrame, out_png: Path) -> None:
     plt.yticks(range(len(mat.index)), mat.index)
     plt.title("Pairwise overlap (Jaccard)")
     plt.tight_layout()
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_pdf, dpi=200)
     plt.close()
 
 
@@ -353,7 +353,7 @@ def plot_venn3_from_flags(
     a: str,
     b: str,
     c: str,
-    out_png: Path,
+    out_pdf: Path,
     title: str,
 ) -> None:
     """
@@ -371,8 +371,8 @@ def plot_venn3_from_flags(
         Second set column.
     c : str
         Third set column.
-    out_png : Path
-        Output PNG path.
+    out_pdf : Path
+        Output pdf path.
     title : str
         Plot title.
     """
@@ -388,7 +388,7 @@ def plot_venn3_from_flags(
     venn3([A, B, C], set_labels=(a, b, c))
     plt.title(title)
     plt.tight_layout()
-    plt.savefig(out_png, dpi=200)
+    plt.savefig(out_pdf, dpi=200)
     plt.close()
 
 
@@ -411,7 +411,7 @@ def main() -> None:
         gene_col=args.gene_col,
         out_path=args.out_dir / "set_sizes.tsv",
     )
-    plot_set_sizes(set_sizes=set_sizes, out_png=args.out_dir / "set_sizes.png")
+    plot_set_sizes(set_sizes=set_sizes, out_pdf=args.out_dir / "set_sizes.pdf")
 
     # UpSet: all flags
     all_flag_cols = [c for c in df.columns if c != args.gene_col]
@@ -419,7 +419,7 @@ def main() -> None:
         df=df,
         gene_col=args.gene_col,
         flag_cols=all_flag_cols,
-        out_png=args.out_dir / "upset_all_flags.png",
+        out_pdf=args.out_dir / "upset_all_flags.pdf",
         title="UpSet: all evidence flags",
         max_intersections=args.max_intersections,
     )
@@ -439,7 +439,7 @@ def main() -> None:
             df=df,
             gene_col=args.gene_col,
             flag_cols=core_cols,
-            out_png=args.out_dir / "upset_core_flags.png",
+            out_pdf=args.out_dir / "upset_core_flags.pdf",
             title="UpSet: core evidence flags",
             max_intersections=args.max_intersections,
         )
@@ -452,7 +452,7 @@ def main() -> None:
             a="in_hpo_gene_set",
             b="clinvar_hc_pathogenic_present",
             c="in_testis_high_conf_final",
-            out_png=args.out_dir / "venn_hpo_clinvarhcpath_testishc.png",
+            out_pdf=args.out_dir / "venn_hpo_clinvarhcpath_testishc.pdf",
             title="Venn: HPO vs ClinVar HC pathogenic vs Testis HC final",
         )
 
@@ -463,13 +463,13 @@ def main() -> None:
             a="in_testis_high_conf_final",
             b="proteomics_present",
             c="sperm_rnaseq_present",
-            out_png=args.out_dir / "venn_testishc_proteomics_sperm.png",
+            out_pdf=args.out_dir / "venn_testishc_proteomics_sperm.pdf",
             title="Venn: Testis HC final vs Proteomics vs Sperm RNA-seq",
         )
 
     # Pairwise overlap heatmap
     jac = jaccard_similarity_matrix(df=df, gene_col=args.gene_col)
-    plot_jaccard_heatmap(mat=jac, out_png=args.out_dir / "jaccard_heatmap.png")
+    plot_jaccard_heatmap(mat=jac, out_pdf=args.out_dir / "jaccard_heatmap.pdf")
     jac.to_csv(args.out_dir / "jaccard_matrix.tsv", sep="\t")
 
     # Quick log to stdout (handy in cluster logs)
