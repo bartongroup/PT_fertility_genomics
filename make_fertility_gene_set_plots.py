@@ -684,6 +684,84 @@ def plot_jaccard_heatmap(mat: pd.DataFrame, out_pdf: Path) -> None:
     plt.close()
 
 
+def write_venn3_gene_sets(
+    df: pd.DataFrame,
+    gene_col: str,
+    a: str,
+    b: str,
+    c: str,
+    out_dir: Path,
+    prefix: str,
+) -> None:
+    """
+    Write gene lists for each region of a 3-way Venn diagram.
+
+    Outputs (TSV, one column: gene_key):
+    - <prefix>__A_only.tsv
+    - <prefix>__B_only.tsv
+    - <prefix>__C_only.tsv
+    - <prefix>__A_and_B_only.tsv
+    - <prefix>__A_and_C_only.tsv
+    - <prefix>__B_and_C_only.tsv
+    - <prefix>__A_and_B_and_C.tsv
+    - <prefix>__A_all.tsv
+    - <prefix>__B_all.tsv
+    - <prefix>__C_all.tsv
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Flags table (one row per gene), containing boolean columns a, b, c.
+    gene_col : str
+        Gene identifier column (e.g. 'gene_key').
+    a : str
+        Column name for set A.
+    b : str
+        Column name for set B.
+    c : str
+        Column name for set C.
+    out_dir : Path
+        Output directory to write TSV files into.
+    prefix : str
+        Prefix for output filenames.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _as_set(flag_col: str) -> set[str]:
+        return set(df.loc[df[flag_col].astype(bool), gene_col].astype(str))
+
+    A = _as_set(a)
+    B = _as_set(b)
+    C = _as_set(c)
+
+    A_only = A - B - C
+    B_only = B - A - C
+    C_only = C - A - B
+
+    A_and_B_only = (A & B) - C
+    A_and_C_only = (A & C) - B
+    B_and_C_only = (B & C) - A
+
+    A_and_B_and_C = A & B & C
+
+    outputs = {
+        f"{prefix}__A_only.tsv": sorted(A_only),
+        f"{prefix}__B_only.tsv": sorted(B_only),
+        f"{prefix}__C_only.tsv": sorted(C_only),
+        f"{prefix}__A_and_B_only.tsv": sorted(A_and_B_only),
+        f"{prefix}__A_and_C_only.tsv": sorted(A_and_C_only),
+        f"{prefix}__B_and_C_only.tsv": sorted(B_and_C_only),
+        f"{prefix}__A_and_B_and_C.tsv": sorted(A_and_B_and_C),
+        f"{prefix}__A_all.tsv": sorted(A),
+        f"{prefix}__B_all.tsv": sorted(B),
+        f"{prefix}__C_all.tsv": sorted(C),
+    }
+
+    for fname, genes in outputs.items():
+        pd.DataFrame({gene_col: genes}).to_csv(out_dir / fname, sep="\t", index=False)
+
+
+
 def plot_venn3_from_flags(
     df: pd.DataFrame,
     gene_col: str,
@@ -692,9 +770,13 @@ def plot_venn3_from_flags(
     c: str,
     out_pdf: Path,
     title: str,
+    out_sets_dir: Optional[Path] = None,
+    out_sets_prefix: Optional[str] = None,
 ) -> None:
     """
     Plot a 3-way Venn diagram for three boolean columns.
+
+    Optionally writes the gene sets for each Venn region to TSV files.
 
     Parameters
     ----------
@@ -712,20 +794,48 @@ def plot_venn3_from_flags(
         Output pdf path.
     title : str
         Plot title.
+    out_sets_dir : Optional[Path], optional
+        If provided, write TSV gene lists for Venn regions into this directory.
+    out_sets_prefix : Optional[str], optional
+        Prefix used for TSV filenames. Required if out_sets_dir is provided.
     """
     for col in (a, b, c):
         if col not in df.columns:
             raise ValueError(f"Missing column for Venn: {col}")
 
+    if out_sets_dir is not None:
+        if not out_sets_prefix:
+            raise ValueError("out_sets_prefix must be provided when out_sets_dir is set.")
+        write_venn3_gene_sets(
+            df=df,
+            gene_col=gene_col,
+            a=a,
+            b=b,
+            c=c,
+            out_dir=out_sets_dir,
+            prefix=out_sets_prefix,
+        )
+
     A = set(df.loc[df[a], gene_col])
     B = set(df.loc[df[b], gene_col])
     C = set(df.loc[df[c], gene_col])
 
-    plt.figure()
-    venn3([A, B, C], set_labels=(a, b, c))
-    plt.title(title)
+    plt.figure(figsize=(8, 8))
+
+    venn = venn3([A, B, C], set_labels=(a, b, c))
+    # Reduce set label size
+    for text in venn.set_labels:
+        if text is not None:
+            text.set_fontsize(8)
+    # Reduce subset number font size
+    for text in venn.subset_labels:
+        if text is not None:
+            text.set_fontsize(8)
+
+    # Smaller title, with padding so it stays inside figure
+    plt.title(title, fontsize=9, pad=10)
     plt.tight_layout()
-    plt.savefig(out_pdf, dpi=200)
+    plt.savefig(out_pdf, dpi=300)
     plt.close()
 
 
@@ -837,6 +947,7 @@ def main() -> None:
             "in_testis_high_conf_final",
         ]
     ):
+
         plot_venn3_from_flags(
             df=df,
             gene_col=args.gene_col,
@@ -845,6 +956,8 @@ def main() -> None:
             c="in_testis_high_conf_final",
             out_pdf=args.out_dir / "venn_hpo_clinvarhcpath_testishc.pdf",
             title="Venn: HPO vs ClinVar HC pathogenic vs Testis HC final",
+            out_sets_dir=args.out_dir / "venn_sets",
+            out_sets_prefix="hpo__clinvar_hc_path__testis_hc_final",
         )
 
     if all(
@@ -855,6 +968,7 @@ def main() -> None:
             "sperm_rnaseq_present",
         ]
     ):
+
         plot_venn3_from_flags(
             df=df,
             gene_col=args.gene_col,
@@ -863,6 +977,8 @@ def main() -> None:
             c="sperm_rnaseq_present",
             out_pdf=args.out_dir / "venn_testishc_proteomics_sperm.pdf",
             title="Venn: Testis HC final vs Proteomics vs Sperm RNA-seq",
+            out_sets_dir=args.out_dir / "venn_sets",
+            out_sets_prefix="testis_hc_final__proteomics__sperm_rnaseq",
         )
 
     # ------------------------------------------------------------------
