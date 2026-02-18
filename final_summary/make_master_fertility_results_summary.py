@@ -46,6 +46,25 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 
+def default_literature_xlsx() -> Path:
+    """
+    Return the default literature Excel path within the repository.
+
+    The expected repo layout is:
+      repo_root/
+        data/Literature_Functional_Genes.xlsx
+        final_summary/make_master_fertility_results_summary.py
+
+    Returns
+    -------
+    Path
+        Absolute path to the default literature Excel file.
+    """
+    script_dir = Path(__file__).resolve().parent
+    repo_root = script_dir.parent
+    return repo_root / "data" / "Literature_Functional_Genes.xlsx"
+
+
 def parse_args() -> argparse.Namespace:
     """
     Parse command line arguments.
@@ -73,6 +92,28 @@ def parse_args() -> argparse.Namespace:
             "e.g. testis_tau0.95_testisTPM5_presentTPM5_spermTPM0.1"
         ),
     )
+
+    parser.add_argument(
+        "--literature_xlsx",
+        required=False,
+        type=Path,
+        default=default_literature_xlsx(),
+        help=(
+            "Excel file containing a sheet named 'Literature_Functional_Genes'. "
+            "Default: repo_root/data/Literature_Functional_Genes.xlsx. "
+            "Set to an empty string to disable, or pass a different path."
+        ),
+    )
+
+
+    parser.add_argument(
+        "--literature_sheet_name",
+        required=False,
+        type=str,
+        default="Literature_Functional_Genes",
+        help="Sheet name in --literature_xlsx (default: Literature_Functional_Genes).",
+    )
+
     parser.add_argument(
         "--out_xlsx",
         required=True,
@@ -207,6 +248,111 @@ def classify_proteomics_evidence(df: pd.DataFrame) -> pd.DataFrame:
 
     out["proteomics_evidence_level"] = levels
     return out
+
+
+def series_to_yes_bool(series: pd.Series) -> pd.Series:
+    """
+    Convert a literature column containing 'Yes', 'No', 'No Data' (plus citations)
+    into a boolean Series where any 'yes' (case-insensitive) is True.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Input Series, e.g. 'Yes (Lin 2024)' or 'No Data'.
+
+    Returns
+    -------
+    pd.Series
+        Boolean Series.
+    """
+    s = series.fillna("").astype(str).str.strip().str.lower()
+    return s.str.contains("yes", regex=False)
+
+
+def load_literature_table(
+    in_xlsx: Path,
+    sheet_name: str,
+) -> pd.DataFrame:
+    """
+    Load and normalise the Literature_Functional_Genes sheet.
+
+    Expected columns
+    ----------------
+    - Gene
+    - Mode of Action / Biological Role
+    - Reference (Role)
+    - Protein in Sperm?
+    - Sperm RNA?
+    - Testis RNA?
+
+    Returns
+    -------
+    pd.DataFrame
+        Normalised literature table with:
+        - gene_key
+        - lit_support_protein
+        - lit_support_sperm_rna
+        - lit_support_testis_rna
+        - lit_mode_of_action
+        - lit_reference_role
+        - plus the original columns retained (useful for the workbook sheet).
+    """
+    df = pd.read_excel(in_xlsx, sheet_name=sheet_name, dtype=str)
+
+    required = [
+        "Gene",
+        "Mode of Action / Biological Role",
+        "Reference (Role)",
+        "Protein in Sperm?",
+        "Sperm RNA?",
+        "Testis RNA?",
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Literature sheet '{sheet_name}' missing required columns: {missing}. "
+            f"Columns seen: {list(df.columns)}"
+        )
+
+    out = df.copy()
+    out["Gene"] = out["Gene"].fillna("").astype(str).str.strip()
+
+    # Create gene_key for joins: strip, upper, remove spaces
+    out["gene_key"] = (
+        out["Gene"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .str.replace(" ", "", regex=False)
+    )
+    out = out[out["gene_key"] != ""].copy()
+
+    out["lit_support_protein"] = series_to_yes_bool(out["Protein in Sperm?"])
+    out["lit_support_sperm_rna"] = series_to_yes_bool(out["Sperm RNA?"])
+    out["lit_support_testis_rna"] = series_to_yes_bool(out["Testis RNA?"])
+
+    out["lit_mode_of_action"] = out["Mode of Action / Biological Role"].fillna("").astype(str).str.strip()
+    out["lit_reference_role"] = out["Reference (Role)"].fillna("").astype(str).str.strip()
+
+    # One row per gene_key (if duplicates exist, keep any True for support flags,
+    # and keep the first text fields).
+    agg = {
+        "Gene": "first",
+        "Mode of Action / Biological Role": "first",
+        "Reference (Role)": "first",
+        "Protein in Sperm?": "first",
+        "Sperm RNA?": "first",
+        "Testis RNA?": "first",
+        "lit_support_protein": "any",
+        "lit_support_sperm_rna": "any",
+        "lit_support_testis_rna": "any",
+        "lit_mode_of_action": "first",
+        "lit_reference_role": "first",
+    }
+    out = out.groupby("gene_key", as_index=False).agg(agg)
+
+    return out
+
 
 
 def summarise_clinvar_by_gene(df: pd.DataFrame) -> pd.DataFrame:
@@ -582,6 +728,63 @@ def main() -> None:
     )
 
 
+    genes_master["in_literature_fertility_set"] = False
+    tier_summary["in_literature_fertility_set"] = False
+
+
+    literature_df = None
+    if args.literature_xlsx is not None:
+        lit_path = Path(args.literature_xlsx)
+
+        if lit_path.exists() and lit_path.stat().st_size > 0:
+            literature_df = load_literature_table(
+                in_xlsx=lit_path,
+                sheet_name=args.literature_sheet_name,
+            )
+        else:
+            literature_df = None
+
+        literature_df = load_literature_table(
+            in_xlsx=args.literature_xlsx,
+            sheet_name=args.literature_sheet_name,
+        )
+
+        lit_gene_keys = set(literature_df["gene_key"].astype(str))
+
+        # Add literature flags to Genes_Master
+        genes_master["in_literature_fertility_set"] = genes_master["gene_key"].isin(lit_gene_keys)
+
+        # Merge graded support + text annotations (left join)
+        lit_keep = [
+            "gene_key",
+            "lit_support_protein",
+            "lit_support_sperm_rna",
+            "lit_support_testis_rna",
+            "lit_mode_of_action",
+            "lit_reference_role",
+        ]
+        genes_master = genes_master.merge(
+            literature_df[lit_keep],
+            on="gene_key",
+            how="left",
+        )
+
+        # Ensure booleans default to False if missing
+        for c in ["lit_support_protein", "lit_support_sperm_rna", "lit_support_testis_rna"]:
+            if c in genes_master.columns:
+                genes_master[c] = genes_master[c].fillna(False).astype(bool)
+
+        # Add literature flags to Tier summary (used by UpSet/Venn/etc.)
+        tier_summary["in_literature_fertility_set"] = tier_summary["gene_key"].isin(lit_gene_keys)
+        tier_summary = tier_summary.merge(
+            literature_df[["gene_key", "lit_support_protein", "lit_support_sperm_rna", "lit_support_testis_rna"]],
+            on="gene_key",
+            how="left",
+        )
+        for c in ["lit_support_protein", "lit_support_sperm_rna", "lit_support_testis_rna"]:
+            tier_summary[c] = tier_summary[c].fillna(False).astype(bool)
+
+
     prot_anchor = "prot_present_fraction"
     if "proteomics_evidence_level" in genes_master.columns and prot_anchor in genes_master.columns:
         cols = list(genes_master.columns)
@@ -613,6 +816,9 @@ def main() -> None:
                 "clinvar_hc_pathogenic_gene_summary",
                 "clinvar_hc_pathogenic_report",
                 "include_variant_sheets",
+                "literature_xlsx",
+                "literature_sheet_name",
+
             ],
             "value": [
                 dt.datetime.now().isoformat(timespec="seconds"),
@@ -630,6 +836,9 @@ def main() -> None:
                 str(clinvar_hc_gene_summary),
                 str(clinvar_hc_report),
                 str(bool(args.include_variant_sheets)),
+                str(args.literature_xlsx) if args.literature_xlsx is not None else "",
+                str(args.literature_sheet_name),
+
             ],
         }
     )
@@ -642,6 +851,11 @@ def main() -> None:
     if tissue_medians.exists() and tissue_medians.stat().st_size > 0:
         tissue_df = read_tsv(tissue_medians)
         write_sheet(wb, "GTEx_Tissue_Medians", tissue_df)
+
+    
+    if literature_df is not None:
+        write_sheet(wb, args.literature_sheet_name, literature_df)
+
 
     # Variant-level sheets (optional)
     if args.include_variant_sheets:

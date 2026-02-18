@@ -114,6 +114,93 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+
+def write_novelty_tables(df: pd.DataFrame, gene_col: str, out_dir: Path) -> None:
+    """
+    Write novelty classification tables based on literature, HPO, ClinVar and HC sets.
+
+    Definitions
+    -----------
+    known_vs_novel:
+      - Known if in_literature_fertility_set is True
+      - Novel otherwise
+
+    totally_novel (boss-friendly strict):
+      - NOT in_literature_fertility_set
+      - NOT in_hpo_gene_set
+      - NOT in any ClinVar tier (best/hc, pathogenic/any)
+      - AND in_testis_high_conf_final is True
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Tier summary flags table (one row per gene).
+    gene_col : str
+        Gene identifier column (usually gene_key).
+    out_dir : Path
+        Output directory.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    work = df.copy()
+    for col in [
+        "in_literature_fertility_set",
+        "in_hpo_gene_set",
+        "clinvar_best_present",
+        "clinvar_best_pathogenic_present",
+        "clinvar_hc_present",
+        "clinvar_hc_pathogenic_present",
+        "in_testis_high_conf_final",
+    ]:
+        if col not in work.columns:
+            work[col] = False
+        work[col] = work[col].fillna(False).astype(bool)
+
+    work["known_vs_novel"] = np.where(
+        work["in_literature_fertility_set"].astype(bool),
+        "Known",
+        "Novel",
+    )
+
+    any_clinvar = (
+        work["clinvar_best_present"]
+        | work["clinvar_best_pathogenic_present"]
+        | work["clinvar_hc_present"]
+        | work["clinvar_hc_pathogenic_present"]
+    )
+
+    work["totally_novel"] = (
+        (~work["in_literature_fertility_set"])
+        & (~work["in_hpo_gene_set"])
+        & (~any_clinvar)
+        & (work["in_testis_high_conf_final"])
+    )
+
+    # Summary counts
+    summary = (
+        work.groupby(["known_vs_novel", "totally_novel"])
+        .size()
+        .reset_index(name="n_genes")
+        .sort_values(["known_vs_novel", "totally_novel"], ascending=[True, False])
+    )
+    summary.to_csv(out_dir / "novelty_summary.tsv", sep="\t", index=False)
+
+    # Gene lists
+    cols = [gene_col, "known_vs_novel", "totally_novel"]
+    work[cols].sort_values([ "totally_novel", gene_col], ascending=[False, True]).to_csv(
+        out_dir / "novelty_per_gene.tsv",
+        sep="\t",
+        index=False,
+    )
+
+    totally_novel_genes = work.loc[work["totally_novel"], [gene_col]].copy()
+    totally_novel_genes.sort_values(gene_col).to_csv(
+        out_dir / "totally_novel_genes.tsv",
+        sep="\t",
+        index=False,
+    )
+
+
 def series_to_bool(series: pd.Series) -> pd.Series:
     """
     Convert a pandas Series of mixed values into a boolean Series.
@@ -864,22 +951,28 @@ def main() -> None:
         gene_col=args.gene_col,
     )
 
-
     genes_master = pd.read_excel(
-    io=args.in_xlsx,
-    sheet_name="Genes_Master",
-    dtype=str,
+        io=args.in_xlsx,
+        sheet_name="Genes_Master",
+        dtype=str,
     )
+
+
 
     genes_master["gene_key"] = genes_master["gene_key"].fillna("").astype(str).str.strip()
     genes_master["Name"] = genes_master["Name"].fillna("").astype(str).str.strip()
 
-    shortlist_symbols = set(
-        df.loc[df["in_testis_high_conf_final"].astype(bool), args.gene_col]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
+
+    if "in_testis_high_conf_final" in df.columns:
+        shortlist_symbols = set(
+            df.loc[df["in_testis_high_conf_final"].astype(bool), args.gene_col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+    else:
+        shortlist_symbols = set()
+
 
     shortlist_ensembl_versioned = (
         genes_master.loc[genes_master["gene_key"].isin(shortlist_symbols), "Name"]
@@ -899,6 +992,8 @@ def main() -> None:
         out_path=args.out_dir / "set_sizes.tsv",
     )
     plot_set_sizes(set_sizes=set_sizes, out_pdf=args.out_dir / "set_sizes.pdf")
+
+    write_novelty_tables(df=df, gene_col=args.gene_col, out_dir=args.out_dir)
 
     # ------------------------------------------------------------------
     # 3) UpSet plots
@@ -924,7 +1019,14 @@ def main() -> None:
         "in_testis_high_conf_final",
         "proteomics_present",
         "sperm_rnaseq_present",
+        "in_literature_fertility_set",
+        "lit_support_protein",
+        "lit_support_sperm_rna",
+        "lit_support_testis_rna",
     ]
+
+
+
     core_cols = [c for c in core_cols if c in df.columns]
     if len(core_cols) >= 2:
         _ = upset_plot(
@@ -1036,7 +1138,11 @@ def main() -> None:
             gm[args.gene_col] = gm["gene_key"]
 
         gm[args.gene_col] = gm[args.gene_col].fillna("").astype(str).str.strip()
-        gm["ensembl_gene_id"] = gm.get("ensembl_gene_id", "").fillna("").astype(str).str.strip()
+
+        if "ensembl_gene_id" not in gm.columns:
+            gm["ensembl_gene_id"] = ""
+        gm["ensembl_gene_id"] = gm["ensembl_gene_id"].fillna("").astype(str).str.strip()
+
 
         shortlist_map = gm.loc[
             gm[args.gene_col].isin(shortlist_symbols),
