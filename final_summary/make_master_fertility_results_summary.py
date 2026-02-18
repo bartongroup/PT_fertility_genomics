@@ -740,7 +740,7 @@ def main() -> None:
 
 
     literature_df = None
-    if (not args.no_literature) and (args.literature_xlsx is not None)
+    if (not args.no_literature) and (args.literature_xlsx is not None):
         lit_path = Path(args.literature_xlsx)
 
         if lit_path.exists() and lit_path.stat().st_size > 0:
