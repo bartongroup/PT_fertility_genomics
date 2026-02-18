@@ -114,6 +114,13 @@ def parse_args() -> argparse.Namespace:
         help="Sheet name in --literature_xlsx (default: Literature_Functional_Genes).",
     )
 
+
+    parser.add_argument(
+        "--no_literature",
+        action="store_true",
+        help="Disable use of the literature workbook even if the default file exists.",
+    )
+
     parser.add_argument(
         "--out_xlsx",
         required=True,
@@ -733,7 +740,7 @@ def main() -> None:
 
 
     literature_df = None
-    if args.literature_xlsx is not None:
+    if (not args.no_literature) and (args.literature_xlsx is not None)
         lit_path = Path(args.literature_xlsx)
 
         if lit_path.exists() and lit_path.stat().st_size > 0:
@@ -741,14 +748,8 @@ def main() -> None:
                 in_xlsx=lit_path,
                 sheet_name=args.literature_sheet_name,
             )
-        else:
-            literature_df = None
 
-        literature_df = load_literature_table(
-            in_xlsx=args.literature_xlsx,
-            sheet_name=args.literature_sheet_name,
-        )
-
+    if literature_df is not None:
         lit_gene_keys = set(literature_df["gene_key"].astype(str))
 
         # Add literature flags to Genes_Master
