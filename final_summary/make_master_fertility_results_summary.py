@@ -787,7 +787,7 @@ def main() -> None:
             genes_master = genes_master.merge(public_prot_df, on="gene_key", how="left")
         else:
             public_prot_df = None
-            print(f"WARNING: --public_proteomics_tsv not found or empty")
+            print(f"WARNING: --public_proteomics_tsv not found or empty: {p}")
 
     if "public_prot_present_any" in genes_master.columns:
         genes_master["public_prot_present_any"] = genes_master["public_prot_present_any"].fillna(False).astype(bool)
@@ -922,6 +922,7 @@ def main() -> None:
         )
 
         # Ensure booleans default to False if missing
+
         for c in ["lit_support_protein", "lit_support_sperm_rna", "lit_support_testis_rna"]:
             if c in genes_master.columns:
                 genes_master[c] = genes_master[c].fillna(False).astype(bool)
@@ -933,17 +934,10 @@ def main() -> None:
             on="gene_key",
             how="left",
         )
-        for c in ["lit_support_protein", "lit_support_sperm_rna", "lit_support_testis_rna"]:(
+
+        for c in ["lit_support_protein", "lit_support_sperm_rna", "lit_support_testis_rna"]:
             tier_summary[c] = tier_summary[c].fillna(False).astype(bool)
 
-
-    prot_anchor = "prot_present_fraction"
-    if "proteomics_evidence_level" in genes_master.columns and prot_anchor in genes_master.columns:
-        cols = list(genes_master.columns)
-        cols.remove("proteomics_evidence_level")
-        insert_at = cols.index(prot_anchor) + 1
-        cols.insert(insert_at, "proteomics_evidence_level")
-        genes_master = genes_master[cols]
 
     if "public_prot_present_any" in genes_master.columns:
         genes_master["public_proteomics_evidence_level"] = "None"
@@ -1009,7 +1003,13 @@ def main() -> None:
         }
     )
 
+    
+
     genes_master = reorder_genes_master_columns(df=genes_master)
+
+    if args.no_internal_proteomics:
+        internal_cols = [c for c in genes_master.columns if c.startswith("prot_") or c == "proteomics_evidence_level"]
+        genes_master = genes_master.drop(columns=internal_cols, errors="ignore")
 
     write_sheet(wb, "README", readme)
     write_sheet(wb, "Genes_Master", genes_master)
