@@ -336,7 +336,9 @@ def upset_plot(
         ind[c] = ind[c].fillna(False).astype(bool)
 
     # UpSet input (one row per gene, membership indicated by booleans)
-    upset_data = from_indicators(indicators=list(flag_cols), data=ind)
+    #upset_data = from_indicators(indicators=list(flag_cols), data=ind)
+    upset_data = from_indicators(ind, data=ind.index.to_series())
+
 
     plt.figure()
     upset = UpSet(
@@ -1004,24 +1006,24 @@ def main() -> None:
         index=False,
     )
 
+
+
     core_cols = [
         "in_hpo_gene_set",
         "clinvar_hc_pathogenic_present",
         "in_testis_high_conf_final",
+        "proteomics_present_internal",
+        "proteomics_present_public",
         "proteomics_present_any_source",
         "sperm_rnaseq_present",
         "in_literature_fertility_set",
         "lit_support_protein",
         "lit_support_sperm_rna",
         "lit_support_testis_rna",
-        "proteomics_present_internal",
-        "proteomics_present_public",
-        "proteomics_present_any_source",
     ]
-
-
-
     core_cols = [c for c in core_cols if c in df.columns]
+
+
     if len(core_cols) >= 2:
         _ = upset_plot(
             df=df,
