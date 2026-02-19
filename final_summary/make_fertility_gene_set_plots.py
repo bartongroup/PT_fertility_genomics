@@ -942,11 +942,12 @@ def main() -> None:
             proteomics_col = c
             break
 
-    if proteomics_col is not None and "proteomics_present" not in df.columns:
-        df["proteomics_present"] = df[proteomics_col].fillna(False).astype(bool)
-    else:
-        df["proteomics_present"] = False
 
+    if "proteomics_present" not in df.columns:
+        if proteomics_col is not None:
+            df["proteomics_present"] = df[proteomics_col].fillna(False).astype(bool)
+        else:
+            df["proteomics_present"] = False
 
 
     genes_master["gene_key"] = genes_master["gene_key"].fillna("").astype(str).str.strip()
