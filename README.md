@@ -131,6 +131,10 @@ Tau reference:  https://pubmed.ncbi.nlm.nih.gov/15388519/
 - **Key output:**
   - GTEx ranked table with HGNC symbols (TSV)
 
+### external proteomics data:
+
+wget https://ftp.pride.ebi.ac.uk/pride/data/archive/2019/11/PXD014618/DBsearchpsm.csv
+
 ### Step 3. Annotate GTEx genes with ClinVar gene/condition evidence
 
 - **Script:** `RNAseq/annotate_testis_genes_with_clinvar.py`

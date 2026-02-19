@@ -229,6 +229,23 @@ python "${SCRIPTS_DIR}/add_proteomics_annotation.py" \
   --log_path "${LOG_DIR}/proteomics_annotation.log" \
   --log_level "INFO"
 
+
+###############################################################################
+# 8b) Add proteomics annotation
+###############################################################################
+
+
+python "${SCRIPTS_DIR}"/summarise_pxd014618_toppic_output_table.py \
+  --input_tables \
+    /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/PXD014618_proteomics/3506_AS_7738_RedAlkC18_Acclaim50_07_ms2.OUTPUT_TABLE \
+    /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/PXD014618_proteomics/3506_AS_7738_RedAlkC18_Acclaim50_14_ms2.OUTPUT_TABLE \
+  --out_tsv /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/PXD014618_proteomics/PXD014618_gene_level_proteomics.tsv \
+  --q_value_threshold 0.01 \
+  --proteoform_fdr_threshold 0.01 \
+  --require_both_thresholds \
+  --write_per_replicate_columns
+
+
 ###############################################################################
 # 9) Final high-confidence extraction (after HPO + proteomics)
 ###############################################################################

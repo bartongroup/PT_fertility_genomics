@@ -50,6 +50,22 @@ else
         "${GTEX_URL}"
 fi
 
+
+
+
+###############################################################################
+# more proteomics
+###############################################################################
+
+mkdir -p PXD014618_proteomics
+
+cd PXD014618_proteomics
+
+wget https://ftp.pride.ebi.ac.uk/pride/data/archive/2019/11/PXD014618/3506_AS_7738_RedAlkC18_Acclaim50_14_ms2.OUTPUT_TABLE
+wget https://ftp.pride.ebi.ac.uk/pride/data/archive/2019/11/PXD014618/3506_AS_7738_RedAlkC18_Acclaim50_07_ms2.OUTPUT_TABLE
+
+cd ../
+
 ###############################################################################
 # Sperm RNA-seq (GSE40181)
 ###############################################################################
