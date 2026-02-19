@@ -105,7 +105,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-
     parser.add_argument(
         "--literature_sheet_name",
         required=False,
@@ -119,6 +118,26 @@ def parse_args() -> argparse.Namespace:
         "--no_literature",
         action="store_true",
         help="Disable use of the literature workbook even if the default file exists.",
+    )
+
+    parser.add_argument(
+        "--public_proteomics_tsv",
+        required=False,
+        type=Path,
+        default=None,
+        help=(
+            "Optional gene-level proteomics TSV derived from PRIDE PXD014618 "
+            "(output of summarise_pxd014618_toppic_output_table.py)."
+        ),
+    )
+
+    parser.add_argument(
+        "--no_internal_proteomics",
+        action="store_true",
+        help=(
+            "Ignore any internal proteomics columns present in the testis annotated table. "
+            "Useful for public-only runs."
+        ),
     )
 
     parser.add_argument(
@@ -171,6 +190,50 @@ def normalise_gene_symbol(value: str) -> str:
     v = str(value).strip()
     v = re.sub(r"\s+", "", v)
     return v.upper()
+
+
+def load_public_proteomics_tsv(path: Path) -> pd.DataFrame:
+    """
+    Load a gene-level public proteomics TSV (e.g. PRIDE PXD014618 summary).
+
+    Parameters
+    ----------
+    path : Path
+        TSV file containing at least: gene_key, prot_present_any, prot_present_fraction.
+
+    Returns
+    -------
+    pd.DataFrame
+        Normalised table with:
+        - gene_key
+        - public_prot_present_any
+        - public_prot_present_fraction
+    """
+    df = pd.read_csv(path, sep="\t", dtype=str, low_memory=False)
+
+    if "gene_key" not in df.columns:
+        raise ValueError(f"Public proteomics TSV missing 'gene_key': {path}")
+
+    out = df.copy()
+    out["gene_key"] = out["gene_key"].fillna("").map(normalise_gene_symbol)
+
+    if "prot_present_any" in out.columns:
+        out["public_prot_present_any"] = (
+            out["prot_present_any"].fillna("").astype(str).str.strip().str.lower().isin({"true", "t", "1", "yes", "y"})
+        )
+    else:
+        out["public_prot_present_any"] = False
+
+    if "prot_present_fraction" in out.columns:
+        out["public_prot_present_fraction"] = pd.to_numeric(
+            out["prot_present_fraction"], errors="coerce"
+        )
+    else:
+        out["public_prot_present_fraction"] = pd.NA
+
+    keep = ["gene_key", "public_prot_present_any", "public_prot_present_fraction"]
+    return out[keep].drop_duplicates(subset=["gene_key"])
+
 
 
 def ensure_gene_key(df: pd.DataFrame, candidate_cols: Iterable[str]) -> pd.DataFrame:
@@ -360,6 +423,56 @@ def load_literature_table(
 
     return out
 
+
+def reorder_genes_master_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Reorder Genes_Master columns to keep related fields together.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Genes_Master DataFrame.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns reordered (any missing columns are ignored).
+    """
+    preferred_order = [
+        # Key
+        "gene_key",
+
+        # Core flags
+        "in_testis_high_conf_final",
+        "in_hpo_gene_set",
+        "clinvar_best_present",
+        "clinvar_best_pathogenic_present",
+        "clinvar_hc_present",
+        "clinvar_hc_pathogenic_present",
+        "in_literature_fertility_set",
+
+        # Transcript/protein presence (internal pipeline)
+        "sperm_present_any",
+        "prot_present_any",
+        "prot_present_fraction",
+        "proteomics_evidence_level",
+
+        # Public proteomics (PXD014618)
+        "public_prot_present_any",
+        "public_prot_present_fraction",
+        "public_proteomics_evidence_level",
+
+        # Literature annotations
+        "lit_support_protein",
+        "lit_support_sperm_rna",
+        "lit_support_testis_rna",
+        "lit_mode_of_action",
+        "lit_reference_role",
+    ]
+
+    cols_present = [c for c in preferred_order if c in df.columns]
+    remaining = [c for c in df.columns if c not in cols_present]
+    return df[cols_present + remaining]
 
 
 def summarise_clinvar_by_gene(df: pd.DataFrame) -> pd.DataFrame:
@@ -663,10 +776,21 @@ def main() -> None:
     genes_master["in_testis_high_conf_final"] = genes_master["gene_key"].isin(set(testis_hc_final_df["gene_key"]))
 
     # Derived summary column for presentation-friendly proteomics interpretation
+    if (not args.no_internal_proteomics) and ("prot_present_any" in genes_master.columns):
+        genes_master = classify_proteomics_evidence(df=genes_master)
 
-    genes_master = classify_proteomics_evidence(df=genes_master)
+    public_prot_df = None
+    if args.public_proteomics_tsv is not None:
+        p = Path(args.public_proteomics_tsv)
+        if p.exists() and p.stat().st_size > 0:
+            public_prot_df = load_public_proteomics_tsv(path=p)
+            genes_master = genes_master.merge(public_prot_df, on="gene_key", how="left")
+        else:
+            public_prot_df = None
+            print(f"WARNING: --public_proteomics_tsv not found or empty")
 
-
+    if "public_prot_present_any" in genes_master.columns:
+        genes_master["public_prot_present_any"] = genes_master["public_prot_present_any"].fillna(False).astype(bool)
 
     # Merge HPO gene summary fields (prefixed)
     hpo_cols = [c for c in hpo_summary_df.columns if c not in ["gene_key"]]
@@ -709,10 +833,30 @@ def main() -> None:
     tier_summary = genes_master[["gene_key"] + flag_cols].copy()
 
     # Add requested presence flags (from testis integrated table columns)
-    if "prot_present_any" in genes_master.columns:
-        tier_summary["proteomics_present"] = _series_to_bool(genes_master["prot_present_any"])
+    internal_present = False
+    if (not args.no_internal_proteomics) and ("prot_present_any" in genes_master.columns):
+        internal_present = _series_to_bool(genes_master["prot_present_any"])
     else:
-        tier_summary["proteomics_present"] = False
+        internal_present = False
+
+    public_present = False
+    if "public_prot_present_any" in genes_master.columns:
+        public_present = genes_master["public_prot_present_any"].fillna(False).astype(bool)
+    else:
+        public_present = False
+
+    # Keep the original column name for backwards compatibility (internal)
+    tier_summary["proteomics_present_internal"] = internal_present
+
+    # Add the new one explicitly
+    tier_summary["proteomics_present_public"] = public_present
+
+    # Combined flag for UpSet/Venn etc.
+    tier_summary["proteomics_present_any_source"] = (
+        tier_summary["proteomics_present_internal"].fillna(False).astype(bool)
+        | tier_summary["proteomics_present_public"].fillna(False).astype(bool)
+    )
+
 
     if "sperm_present_any" in genes_master.columns:
         tier_summary["sperm_rnaseq_present"] = _series_to_bool(genes_master["sperm_present_any"])
@@ -729,10 +873,17 @@ def main() -> None:
     # Collapse to one row per gene (if any duplicates remain for any reason)
     tier_summary = (
         tier_summary.groupby("gene_key", as_index=False)[
-            flag_cols + ["proteomics_present", "sperm_rnaseq_present"]
+            flag_cols
+            + [
+                "proteomics_present_internal",
+                "proteomics_present_public",
+                "proteomics_present_any_source",
+                "sperm_rnaseq_present",
+            ]
         ]
         .any()
     )
+
 
 
     genes_master["in_literature_fertility_set"] = False
@@ -782,7 +933,7 @@ def main() -> None:
             on="gene_key",
             how="left",
         )
-        for c in ["lit_support_protein", "lit_support_sperm_rna", "lit_support_testis_rna"]:
+        for c in ["lit_support_protein", "lit_support_sperm_rna", "lit_support_testis_rna"]:(
             tier_summary[c] = tier_summary[c].fillna(False).astype(bool)
 
 
@@ -793,6 +944,16 @@ def main() -> None:
         insert_at = cols.index(prot_anchor) + 1
         cols.insert(insert_at, "proteomics_evidence_level")
         genes_master = genes_master[cols]
+
+    if "public_prot_present_any" in genes_master.columns:
+        genes_master["public_proteomics_evidence_level"] = "None"
+        genes_master.loc[genes_master["public_prot_present_any"], "public_proteomics_evidence_level"] = "Detected"
+
+        if "public_prot_present_fraction" in genes_master.columns:
+            genes_master.loc[
+                pd.to_numeric(genes_master["public_prot_present_fraction"], errors="coerce") >= 0.5,
+                "public_proteomics_evidence_level"
+            ] = "Strong"
 
 
     # Workbook
@@ -817,6 +978,8 @@ def main() -> None:
                 "clinvar_hc_pathogenic_gene_summary",
                 "clinvar_hc_pathogenic_report",
                 "include_variant_sheets",
+                "public_proteomics_tsv",
+                "no_internal_proteomics",
                 "literature_xlsx",
                 "literature_sheet_name",
 
@@ -837,12 +1000,17 @@ def main() -> None:
                 str(clinvar_hc_gene_summary),
                 str(clinvar_hc_report),
                 str(bool(args.include_variant_sheets)),
+                str(args.public_proteomics_tsv) if args.public_proteomics_tsv is not None else "",
+                str(bool(args.no_internal_proteomics)),
                 str(args.literature_xlsx) if args.literature_xlsx is not None else "",
                 str(args.literature_sheet_name),
 
             ],
         }
     )
+
+    genes_master = reorder_genes_master_columns(df=genes_master)
+
     write_sheet(wb, "README", readme)
     write_sheet(wb, "Genes_Master", genes_master)
     write_sheet(wb, "Tier_Summary_With_Omics", tier_summary)
