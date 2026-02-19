@@ -267,20 +267,26 @@ def summarise_tables(
     tables : List[Tuple[str, pd.DataFrame]]
         List of (replicate_id, DataFrame) pairs.
     q_value_threshold : float
-        Spectral q-value threshold.
+        Spectral q-value threshold for calling presence.
     proteoform_fdr_threshold : float
-        Proteoform FDR threshold.
+        Proteoform FDR threshold for calling presence (only used if
+        require_both_thresholds is True).
     require_both_thresholds : bool
-        Whether presence requires both thresholds.
+        If True, presence requires both spectral q-value and proteoform FDR to
+        pass. If False, presence is based on spectral q-value only.
     write_per_replicate_columns : bool
-        Whether to include per-replicate presence columns.
+        If True, include per-replicate presence columns in the output.
 
     Returns
     -------
     pd.DataFrame
-        Gene-level summary table.
+        Gene-level summary table across all replicates.
     """
     per_rep_rows: List[pd.DataFrame] = []
+
+    q_col = "Q-value (spectral FDR)"
+    pfdr_col = "Proteoform FDR"
+    intensity_col = "Feature intensity"
 
     for rep_id, df in tables:
         if "Protein name" not in df.columns:
@@ -291,48 +297,42 @@ def summarise_tables(
 
         work = df.copy()
 
-        # Extract gene symbols
+        # Extract gene symbols from 'Protein name' (GN=...)
         work["gene_key"] = work["Protein name"].map(_extract_gene_from_protein_name)
         work = work[work["gene_key"].notna()].copy()
         work["gene_key"] = work["gene_key"].astype(str)
 
-        # Extract key numeric columns (if present)
-        q_col = "Q-value (spectral FDR)"
-        pfdr_col = "Proteoform FDR"
-        intensity_col = "Feature intensity"
+        # Numeric conversions
+        work["_q_value"] = (
+            pd.to_numeric(work[q_col], errors="coerce") if q_col in work.columns else np.nan
+        )
+        work["_proteoform_fdr"] = (
+            pd.to_numeric(work[pfdr_col], errors="coerce")
+            if pfdr_col in work.columns
+            else np.nan
+        )
+        work["_feature_intensity"] = (
+            pd.to_numeric(work[intensity_col], errors="coerce")
+            if intensity_col in work.columns
+            else np.nan
+        )
 
-        if q_col in work.columns:
-            work["_q_value"] = _to_float(work[q_col])
-        else:
-            work["_q_value"] = np.nan
+        # Presence call (NaN never passes)
+        q_pass = work["_q_value"].notna() & (work["_q_value"] <= float(q_value_threshold))
 
-        if pfdr_col in work.columns:
-            work["_proteoform_fdr"] = _to_float(work[pfdr_col])
-        else:
-            work["_proteoform_fdr"] = np.nan
-
-        if intensity_col in work.columns:
-            work["_feature_intensity"] = _to_float(work[intensity_col])
-        else:
-            work["_feature_intensity"] = np.nan
-
-        # Presence call
-        q_pass = work["_q_value"].le(float(q_value_threshold))
         if require_both_thresholds:
-            pfdr_pass = work["_proteoform_fdr"].le(float(proteoform_fdr_threshold))
-            present_mask = q_pass & pfdr_pass
+            pfdr_pass = work["_proteoform_fdr"].notna() & (
+                work["_proteoform_fdr"] <= float(proteoform_fdr_threshold)
+            )
+            work["_present"] = q_pass & pfdr_pass
         else:
-            present_mask = q_pass
-
-        work["_present"] = present_mask.fillna(False)
+            work["_present"] = q_pass
 
         rep_summary = (
             work.groupby("gene_key", as_index=False)
             .agg(
-                prot_present=("._present".replace(".", "_"), "any")
-                if False
-                else ("_present", "any"),
-                prot_n_prsms=("_present", "size"),
+                prot_present=("_present", "any"),
+                prot_n_prsms=("gene_key", "size"),
                 prot_max_feature_intensity=("_feature_intensity", "max"),
                 prot_min_q_value=("_q_value", "min"),
                 prot_min_proteoform_fdr=("_proteoform_fdr", "min"),
@@ -341,10 +341,13 @@ def summarise_tables(
         rep_summary["replicate_id"] = rep_id
         per_rep_rows.append(rep_summary)
 
+    if not per_rep_rows:
+        raise ValueError("No input tables were provided to summarise_tables().")
+
     per_rep = pd.concat(per_rep_rows, ignore_index=True)
 
     # Combined summary across replicates
-    n_reps_total = per_rep["replicate_id"].nunique()
+    n_reps_total = int(per_rep["replicate_id"].nunique())
 
     combined = (
         per_rep.groupby("gene_key", as_index=False)
@@ -356,36 +359,39 @@ def summarise_tables(
             prot_n_replicates_present=("prot_present", "sum"),
         )
     )
-    combined["prot_n_replicates_total"] = int(n_reps_total)
+
+    combined["prot_n_replicates_total"] = n_reps_total
     combined["prot_present_fraction"] = (
         combined["prot_n_replicates_present"] / combined["prot_n_replicates_total"]
     )
-    combined["prot_present_any"] = combined["prot_n_replicates_present"].astype(int).ge(1)
+    combined["prot_present_any"] = combined["prot_n_replicates_present"].astype(int) >= 1
 
     if write_per_replicate_columns:
-        piv = per_rep.pivot_table(
-            index="gene_key",
-            columns="replicate_id",
-            values="prot_present",
-            aggfunc="max",
-            fill_value=False,
-        ).reset_index()
+        piv = (
+            per_rep.pivot_table(
+                index="gene_key",
+                columns="replicate_id",
+                values="prot_present",
+                aggfunc="max",
+                fill_value=False,
+            )
+            .reset_index()
+        )
         piv.columns = [
-            "gene_key"
-            if c == "gene_key"
-            else f"prot_present__{str(c)}"
+            "gene_key" if c == "gene_key" else f"prot_present__{str(c)}"
             for c in piv.columns
         ]
         combined = combined.merge(piv, on="gene_key", how="left")
 
-    # Sort for convenience
     combined = combined.sort_values(
         by=["prot_present_any", "prot_present_fraction", "prot_max_feature_intensity"],
         ascending=[False, False, False],
         na_position="last",
-    )
+    ).reset_index(drop=True)
 
     return combined
+
+
 
 
 def main() -> None:
