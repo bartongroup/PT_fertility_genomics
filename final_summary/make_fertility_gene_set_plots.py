@@ -470,7 +470,8 @@ def make_evidence_score_table(
     flags = [
         "in_hpo_gene_set",
         "sperm_rnaseq_present",
-        "proteomics_present_any_source",
+        "proteomics_present_internal",
+        "proteomics_present_public",
         "clinvar_best_present",
         "clinvar_best_pathogenic_present",
         "clinvar_hc_present",
@@ -480,7 +481,8 @@ def make_evidence_score_table(
     weights: Dict[str, int] = {
         "in_hpo_gene_set": 1,
         "sperm_rnaseq_present": 1,
-        "proteomics_present_any_source": 1,
+        "proteomics_present_internal": 2,  # example: weight internal higher
+        "proteomics_present_public": 1,    # example: public still counts
         "clinvar_best_present": 1,
         "clinvar_best_pathogenic_present": 2,
         "clinvar_hc_present": 2,
@@ -1023,6 +1025,9 @@ def main() -> None:
         "lit_support_protein",
         "lit_support_sperm_rna",
         "lit_support_testis_rna",
+        "proteomics_present_internal",
+        "proteomics_present_public",
+        "proteomics_present_any_source",
     ]
 
 
@@ -1041,6 +1046,26 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 4) Venn diagrams
     # ------------------------------------------------------------------
+    if all(
+        c in df.columns
+        for c in [
+            "proteomics_present_internal",
+            "proteomics_present_public",
+            "proteomics_present_any_source",
+        ]
+    ):
+        plot_venn3_from_flags(
+            df=df,
+            gene_col=args.gene_col,
+            a="proteomics_present_internal",
+            b="proteomics_present_public",
+            c="proteomics_present_any_source",
+            out_pdf=args.out_dir / "venn_proteomics_internal_public_any.pdf",
+            title="Venn: Proteomics internal vs public vs any-source",
+            out_sets_dir=args.out_dir / "venn_sets",
+            out_sets_prefix="proteomics_internal__public__any",
+        )
+
     if all(
         c in df.columns
         for c in [
@@ -1086,7 +1111,17 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 5) Pairwise overlap heatmap
     # ------------------------------------------------------------------
-    jac = jaccard_similarity_matrix(df=df, gene_col=args.gene_col)
+    preferred_first = [
+        "proteomics_present_internal",
+        "proteomics_present_public",
+        "proteomics_present_any_source",
+    ]
+    ordered_cols = [args.gene_col] + [c for c in preferred_first if c in df.columns] + [
+        c for c in df.columns if c not in {args.gene_col, *preferred_first}
+    ]
+    df_for_jaccard = df[ordered_cols].copy()
+    jac = jaccard_similarity_matrix(df=df_for_jaccard, gene_col=args.gene_col)
+
     plot_jaccard_heatmap(mat=jac, out_pdf=args.out_dir / "jaccard_heatmap.pdf")
     jac.to_csv(args.out_dir / "jaccard_matrix.tsv", sep="\t")
 
