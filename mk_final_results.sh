@@ -11,7 +11,9 @@ python ~/data/2026_sperm_Gates/PT_fertility_genomics/final_summary/make_master_f
   --out_xlsx ~/data/2026_sperm_Gates/results/FULL_SUMMARY/SUMMARY_fertility_evidence.xlsx
 
 
-python make_master_fertility_workbook_from_results.py \
+
+# add public proteomics data too .. 
+python ~/data/2026_sperm_Gates/PT_fertility_genomics/final_summary/make_master_fertility_results_summary.py  \
   --base_dir ~/data/2026_sperm_Gates \
   --testis_run_id testis_tau0.95_testisTPM5_presentTPM5_spermTPM0.1 \
   --public_proteomics_tsv /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/PXD014618_proteomics/PXD014618_gene_level_proteomics.tsv \

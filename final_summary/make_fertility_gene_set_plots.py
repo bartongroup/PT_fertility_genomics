@@ -442,7 +442,7 @@ def make_evidence_score_table(
     ----------------------------------------
     - in_hpo_gene_set: 1
     - sperm_rnaseq_present: 1
-    - proteomics_present: 1
+    - proteomics_present_any_source: 1
     - clinvar_best_present: 1
     - clinvar_best_pathogenic_present: 2
     - clinvar_hc_present: 2
@@ -470,7 +470,7 @@ def make_evidence_score_table(
     flags = [
         "in_hpo_gene_set",
         "sperm_rnaseq_present",
-        "proteomics_present",
+        "proteomics_present_any_source",
         "clinvar_best_present",
         "clinvar_best_pathogenic_present",
         "clinvar_hc_present",
@@ -480,7 +480,7 @@ def make_evidence_score_table(
     weights: Dict[str, int] = {
         "in_hpo_gene_set": 1,
         "sperm_rnaseq_present": 1,
-        "proteomics_present": 1,
+        "proteomics_present_any_source": 1,
         "clinvar_best_present": 1,
         "clinvar_best_pathogenic_present": 2,
         "clinvar_hc_present": 2,
@@ -1017,7 +1017,7 @@ def main() -> None:
         "in_hpo_gene_set",
         "clinvar_hc_pathogenic_present",
         "in_testis_high_conf_final",
-        "proteomics_present",
+        "proteomics_present_any_source",
         "sperm_rnaseq_present",
         "in_literature_fertility_set",
         "lit_support_protein",
@@ -1066,7 +1066,7 @@ def main() -> None:
         c in df.columns
         for c in [
             "in_testis_high_conf_final",
-            "proteomics_present",
+            "proteomics_present_any_source",
             "sperm_rnaseq_present",
         ]
     ):
@@ -1075,7 +1075,7 @@ def main() -> None:
             df=df,
             gene_col=args.gene_col,
             a="in_testis_high_conf_final",
-            b="proteomics_present",
+            b="proteomics_present_any_source",
             c="sperm_rnaseq_present",
             out_pdf=args.out_dir / "venn_testishc_proteomics_sperm.pdf",
             title="Venn: Testis HC final vs Proteomics vs Sperm RNA-seq",
