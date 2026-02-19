@@ -121,6 +121,15 @@ def _normalise_gene_symbol(value: str) -> str:
     return v.upper()
 
 
+
+
+import re
+from pathlib import Path
+from typing import List
+
+import pandas as pd
+
+
 def _find_table_start_line(lines: List[str]) -> int:
     """
     Identify the line index where the tabular section begins.
@@ -150,8 +159,9 @@ def _read_toppic_output_table(path: Path) -> pd.DataFrame:
     """
     Read a TopPIC '*_ms2.OUTPUT_TABLE' file into a DataFrame.
 
-    This file has a parameter preamble followed by a whitespace-aligned table.
-    We use pandas.read_fwf starting from the header line.
+    These files contain a parameter preamble followed by a tab-delimited table.
+    Some rows may wrap across multiple lines (typically within the Proteoform
+    field). This reader stitches wrapped lines back into a single record.
 
     Parameters
     ----------
@@ -165,17 +175,42 @@ def _read_toppic_output_table(path: Path) -> pd.DataFrame:
     """
     lines = path.read_text(errors="replace").splitlines()
     start_idx = _find_table_start_line(lines)
-    table_text = "\n".join(lines[start_idx:])
 
-    # read_fwf handles variable spacing while preserving the 'Protein name' field.
-    df = pd.read_fwf(
+    header = lines[start_idx].rstrip("\n")
+
+    # Fix the known missing separator in the header
+    header = header.replace("Feature intensityProtein name", "Feature intensity\tProtein name")
+
+    # Data rows start with a file path ending in '.msalign' (often 'C:/...').
+    row_start_re = re.compile(r"^(?:[A-Za-z]:[/\\]|/).+\.msalign\b")
+
+    records: List[str] = []
+    for raw in lines[start_idx + 1 :]:
+        line = raw.rstrip("\n")
+        if not line.strip():
+            continue
+
+        if row_start_re.match(line):
+            records.append(line)
+        else:
+            # Continuation line (wrapped proteoform etc.) -> append to previous record
+            if not records:
+                continue
+            records[-1] = records[-1] + " " + line.strip()
+
+    table_text = header + "\n" + "\n".join(records)
+
+    df = pd.read_csv(
         pd.io.common.StringIO(table_text),
+        sep="\t",
         dtype=str,
+        engine="python",
     )
 
-    # Clean column names
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
+
 
 
 def _extract_gene_from_protein_name(protein_name: str) -> Optional[str]:

@@ -26,9 +26,9 @@ set -euo pipefail
 # Base paths (current on-disk layout)
 ###############################################################################
 
-BASE_DIR="${HOME}/data/2026_sperm_Gates"
+BASE_DIR="${HOME}/data/2026_sperm_Gates/"
 
-SCRIPTS_DIR="${BASE_DIR}/scripts"
+SCRIPTS_DIR="${BASE_DIR}/PT_fertility_genomics/RNAseq"
 PHENO_SCRIPTS_DIR="${SCRIPTS_DIR}/find_male_phenotypic_disease"
 
 GTEX_DIR="${BASE_DIR}/GTEx"
