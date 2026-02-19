@@ -312,7 +312,6 @@ def plot_set_sizes(set_sizes: pd.DataFrame, out_pdf: Path) -> None:
     plt.close()
 
 
-
 def upset_plot(
     df: pd.DataFrame,
     gene_col: str,
@@ -324,45 +323,24 @@ def upset_plot(
     """
     Generate an UpSet plot and return the intersection size table.
 
-    This implementation uses subset_size="count" to safely handle non-unique
-    membership patterns (many genes share the same combination of flags).
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Flags table (one row per gene, boolean flag columns).
-    gene_col : str
-        Gene identifier column.
-    flag_cols : Sequence[str]
-        Columns to include in the UpSet plot.
-    out_pdf : Path
-        Output pdf path.
-    title : str
-        Plot title.
-    max_intersections : int
-        Maximum intersections to display.
-
-    Returns
-    -------
-    pd.DataFrame
-        Intersection counts table (top intersections).
+    Uses upsetplot.from_indicators to avoid pandas MultiIndex engine issues that
+    can occur when building a MultiIndex via set_index(flag_cols).
     """
     work = df[[gene_col] + list(flag_cols)].copy()
+    work[gene_col] = work[gene_col].fillna("").astype(str).str.strip()
+    work = work[work[gene_col] != ""].drop_duplicates(subset=[gene_col])
 
-    # Ensure booleans (defensive)
+    # Ensure strict booleans for indicator matrix
+    ind = work.set_index(gene_col)[list(flag_cols)].copy()
     for c in flag_cols:
-        work[c] = work[c].fillna(False).astype(bool)
+        ind[c] = ind[c].fillna(False).astype(bool)
 
-    # Build a Series of 1s indexed by the membership pattern.
-    # Duplicated membership patterns are fine when subset_size="count".
-    upset_series = (
-        work.assign(_count=1)
-        .set_index(list(flag_cols))["_count"]
-    )
+    # UpSet input (one row per gene, membership indicated by booleans)
+    upset_data = from_indicators(indicators=list(flag_cols), data=ind)
 
     plt.figure()
     upset = UpSet(
-        upset_series,
+        upset_data,
         subset_size="count",
         show_counts=True,
         sort_by="cardinality",
@@ -374,12 +352,12 @@ def upset_plot(
     plt.savefig(out_pdf, dpi=200)
     plt.close()
 
-    # Intersection counts table (top N)
-    counts = upset_series.groupby(level=list(range(len(flag_cols)))).sum()
-    counts = counts.sort_values(ascending=False).head(max_intersections)
+    # Intersection counts table (top N), computed directly from indicator patterns
+    counts = ind.value_counts().head(max_intersections)
 
     out_rows: List[Dict[str, object]] = []
     for idx, n in counts.items():
+        # idx is a tuple of booleans in the same order as flag_cols
         included = [flag_cols[i] for i, v in enumerate(idx) if bool(v)]
         out_rows.append(
             {
@@ -389,7 +367,6 @@ def upset_plot(
         )
 
     return pd.DataFrame(out_rows)
-
 
 
 def _series_to_bool(series: pd.Series) -> pd.Series:
@@ -958,6 +935,17 @@ def main() -> None:
         sheet_name="Genes_Master",
         dtype=str,
     )
+
+    proteomics_col = None
+    for c in ["proteomics_present_any_source", "proteomics_present_internal", "proteomics_present_public"]:
+        if c in df.columns:
+            proteomics_col = c
+            break
+
+    if proteomics_col is not None and "proteomics_present" not in df.columns:
+        df["proteomics_present"] = df[proteomics_col].fillna(False).astype(bool)
+    else:
+        df["proteomics_present"] = False
 
 
 
