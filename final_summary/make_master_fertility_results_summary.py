@@ -539,6 +539,29 @@ def summarise_clinvar_by_gene(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalise column names to avoid hidden whitespace/BOM issues.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input DataFrame.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy with stripped, normalised column names.
+    """
+    out = df.copy()
+    out.columns = (
+        pd.Index(out.columns)
+        .map(lambda x: str(x).replace("\ufeff", "").replace("\r", "").strip())
+    )
+    return out
+
+
+
 def drop_empty_gene_keys(df: pd.DataFrame) -> pd.DataFrame:
     """
     Drop rows where gene_key is missing/blank.
@@ -669,6 +692,15 @@ def main() -> None:
 
     # Load
     testis_df = read_tsv(testis_annotated)
+    testis_df = normalise_columns(testis_df)
+
+    prot_cols = [c for c in testis_df.columns if c.startswith("prot_")]
+    print("Proteomics columns detected in testis table:", prot_cols)
+    print("prot_present_any present:", "prot_present_any" in testis_df.columns)
+
+
+
+
     testis_df = ensure_gene_key(
         testis_df,
         candidate_cols=[
@@ -680,12 +712,15 @@ def main() -> None:
     )
 
     hpo_summary_df = read_tsv(hpo_genes_summary)
+    hpo_summary_df = normalise_columns(read_tsv(hpo_genes_summary))
     hpo_summary_df = ensure_gene_key(hpo_summary_df, candidate_cols=["gene_symbol", "GeneSymbol", "symbol"])
 
     hpo_symbols_df = read_tsv(hpo_gene_symbols)
+    hpo_symbols_df = normalise_columns(read_tsv(hpo_gene_symbols))
     hpo_symbols_df = ensure_gene_key(hpo_symbols_df, candidate_cols=["gene_symbol", "GeneSymbol", "symbol"])
 
     clinvar_best_df = read_tsv(clinvar_best)
+    clinvar_best_df = normalise_columns(read_tsv(clinvar_best))
     clinvar_best_df = ensure_gene_key(clinvar_best_df, candidate_cols=["GeneSymbol"])
 
     clinvar_best_path_df = read_tsv(clinvar_best_pathogenic)
@@ -835,7 +870,9 @@ def main() -> None:
     # Add requested presence flags (from testis integrated table columns)
     internal_present = False
     if (not args.no_internal_proteomics) and ("prot_present_any" in genes_master.columns):
-        internal_present = _series_to_bool(genes_master["prot_present_any"])
+        internal_present = genes_master["prot_present_any"].fillna(False)
+        if internal_present.dtype != bool:
+            internal_present = _series_to_bool(internal_present)
     else:
         internal_present = False
 
