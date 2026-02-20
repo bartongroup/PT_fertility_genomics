@@ -125,7 +125,10 @@ log "Temporary directory: ${TMP_DIR}"
 #
 # Example (placeholder): export GENCODE_GTF_URL="https://.../gencode.vXX.annotation.chr.gtf.gz"
 ###############################################################################
-GENCODE_GTF_URL="${GENCODE_GTF_URL:-}"
+GENCODE_GTF_URL="https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/gencode.v49.primary_assembly.annotation.gtf.gz"
+
+GENCODE_GTF_URL="https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_49/gencode.v49.primary_assembly.annotation.gtf.gz"
+
 
 if [[ -n "${GENCODE_GTF_URL}" ]]; then
   gtf_name="$(basename "${GENCODE_GTF_URL}")"
