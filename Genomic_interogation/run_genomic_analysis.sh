@@ -4,9 +4,15 @@ script_dir="/home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/Genomic
 
 # build the features
 
+
+python build_gene_universe_from_gtf.py \
+  --gencode_gtf gencode.v49.primary_assembly.annotation.gtf.gz \
+  --out_tsv gencode_v49_gene_keys_universe.tsv \
+  --verbose
+
 # gzip of the  human fa will not work directly with pyfaidx 
 python ${script_dir}/build_gene_context_table.py \
-  --gene_list_tsv sperm_genes.tsv \
+  --gene_list_tsv gencode_v49_gene_keys_universe.tsv  \
   --gencode_gtf gencode.v49.primary_assembly.annotation.gtf.gz \
   --hg38_fasta hg38.fa \
   --rmsk_tsv_gz rmsk.txt.gz \
