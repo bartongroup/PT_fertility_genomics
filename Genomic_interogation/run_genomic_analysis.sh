@@ -1,12 +1,12 @@
 
 
-
+script_dir="/home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/Genomic_interogation/"
 
 # build the features
 
-python build_gene_context_table.py \
+python ${script_dir}/build_gene_context_table.py \
   --gene_list_tsv sperm_genes.tsv \
-  --gencode_gtf gencode.vXX.annotation.chr.gtf.gz \
+  --gencode_gtf gencode.v49.primary_assembly.annotation.gtf.gz \
   --hg38_fasta hg38.fa.gz \
   --rmsk_tsv_gz rmsk.txt.gz \
   --segdup_tsv_gz genomicSuperDups.txt.gz \
@@ -18,7 +18,7 @@ python build_gene_context_table.py \
 
 # Permutation tests (10,000 matched sets), matching on chromosome + gene length bins, and (optionally) GC bins:
 
-python matched_set_enrichment.py \
+python ${script_dir}matched_set_enrichment.py \
   --features_tsv gene_context_features.tsv \
   --target_gene_list_tsv sperm_genes.tsv \
   --gene_key_column gene_key \

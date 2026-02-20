@@ -5,39 +5,41 @@ build_gene_context_table.py
 
 Build a per-gene genomic context feature table for a target gene list on GRCh38.
 
-This script maps HGNC-style gene symbols (e.g., MNS1, ODAD2) to GENCODE GRCh38
-gene models, then computes a range of genomic-context features per gene.
+This script maps HGNC-style gene symbols (e.g., MNS1, ODAD2, PMFBP1) to GENCODE
+GRCh38 gene models, then computes genomic-context features per gene.
 
-Features include
-- Gene body coordinates and TSS coordinates (gene body plus TSS sensitivity)
-- Local gene density within multiple window sizes (around TSS)
-- Nearest-neighbour distance to any other gene (TSS-to-TSS, per chromosome)
-- Repeat / transposable element proximity and repeat fraction (RepeatMasker rmsk)
-- Segmental duplication overlap and distance (genomicSuperDups)
-- Subtelomeric proximity (distance to nearest chromosome end)
-- GC content for gene body and flanking windows (from hg38 FASTA)
-- Recombination rate summary statistics in windows (from UCSC recombAvg bigWig)
+Key outputs
+-----------
+- Gene body coordinates and gene-level TSS coordinates (sensitivity analysis)
+- Local gene density around TSS (±50 kb, ±250 kb, ±1 Mb)
+- Nearest neighbour distance between gene TSS positions (within chromosome)
+- RepeatMasker repeat fraction in windows around TSS (±10 kb, ±50 kb, ±250 kb)
+- Distance to nearest repeat (any and by class: LINE/SINE/LTR/DNA)
+- Segmental duplication overlap fraction (gene body) and nearest distance
+- Subtelomeric proximity (distance to nearest chromosome end + boolean flags)
+- GC content for gene body and TSS flanks (±10 kb, ±50 kb, ±250 kb)
+- Recombination mean/max in windows around TSS (±50 kb, ±250 kb, ±1 Mb)
 
-Outputs are TSV only.
+All outputs are TSV.
 
-Expected inputs
-- Gene list TSV with a column named 'gene_key' (HGNC gene symbols)
-- GENCODE GTF (GRCh38) containing gene records with gene_name attributes
-- hg38 FASTA (bgzipped or plain) readable by pyfaidx; index will be created if missing
-- UCSC rmsk.txt.gz (RepeatMasker table dump) for hg38
-- UCSC genomicSuperDups.txt.gz (segmental duplications table dump) for hg38
-- UCSC recombAvg.bw (deCODE average recombination bigWig) for hg38
+Notes
+-----
+- Designed to work cleanly with UCSC hg38 resources (chr-prefixed chromosomes).
+- Works with GENCODE primary assembly GTF by normalising chromosomes to chr*.
+- Requires: pandas, numpy, pyranges, pyfaidx, pyBigWig
 
 Example
+-------
 python build_gene_context_table.py \
   --gene_list_tsv sperm_genes.tsv \
-  --gencode_gtf gencode.vXX.annotation.chr.gtf.gz \
+  --gencode_gtf gencode.v49.primary_assembly.annotation.gtf.gz \
   --hg38_fasta hg38.fa.gz \
   --rmsk_tsv_gz rmsk.txt.gz \
   --segdup_tsv_gz genomicSuperDups.txt.gz \
   --recomb_bw recombAvg.bw \
   --out_tsv gene_context_features.tsv \
-  --mapping_report_tsv gene_mapping_report.tsv
+  --mapping_report_tsv gene_mapping_report.tsv \
+  --verbose
 """
 
 from __future__ import annotations
@@ -47,33 +49,15 @@ import gzip
 import logging
 import math
 import os
-import sys
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 
-try:
-    import pyranges as pr
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "Missing dependency 'pyranges'. Install requirements before running."
-    ) from exc
-
-try:
-    import pyBigWig
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "Missing dependency 'pyBigWig'. Install requirements before running."
-    ) from exc
-
-try:
-    from pyfaidx import Fasta
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "Missing dependency 'pyfaidx'. Install requirements before running."
-    ) from exc
+import pyranges as pr
+import pyBigWig
+from pyfaidx import Fasta
 
 
 WINDOWS_BP: Tuple[int, ...] = (50_000, 250_000, 1_000_000)
@@ -81,33 +65,64 @@ REPEAT_WINDOWS_BP: Tuple[int, ...] = (10_000, 50_000, 250_000)
 SUBTELO_THRESHOLDS_BP: Tuple[int, ...] = (1_000_000, 5_000_000, 10_000_000)
 REPEAT_CLASSES: Tuple[str, ...] = ("LINE", "SINE", "LTR", "DNA")
 
+STD_CHROMS: Tuple[str, ...] = tuple([f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"])
+
 
 @dataclass(frozen=True)
 class GeneRecord:
-    """A minimal representation of a gene model for interval computations."""
+    """
+    Representation of a gene with coordinates on a chromosome.
+
+    Attributes
+    ----------
+    gene_id
+        Ensembl gene identifier (may include version suffix).
+    gene_name
+        Gene symbol from GENCODE (typically HGNC-like).
+    chrom
+        Chromosome name (expected to be chr-prefixed).
+    start
+        0-based inclusive start coordinate.
+    end
+        0-based exclusive end coordinate.
+    strand
+        '+' or '-'.
+    """
 
     gene_id: str
     gene_name: str
     chrom: str
-    start: int  # 0-based inclusive
-    end: int  # 0-based exclusive
-    strand: str  # '+' or '-'
+    start: int
+    end: int
+    strand: str
 
     @property
     def length(self) -> int:
         """Return gene length in base pairs."""
-        return max(0, self.end - self.start)
+        return max(0, int(self.end) - int(self.start))
 
     @property
     def tss(self) -> int:
-        """Return 0-based TSS coordinate (single base position)."""
+        """
+        Return 0-based TSS coordinate.
+
+        For '+' strand, TSS is start.
+        For '-' strand, TSS is end - 1.
+        """
         if self.strand == "+":
-            return self.start
-        return max(self.start, self.end - 1)
+            return int(self.start)
+        return max(int(self.start), int(self.end) - 1)
 
 
-def setup_logger(*, verbose: bool) -> None:
-    """Configure logging for the script."""
+def setup_logger(verbose: bool) -> None:
+    """
+    Configure logging.
+
+    Parameters
+    ----------
+    verbose
+        If True, set log level to DEBUG; else INFO.
+    """
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -116,81 +131,39 @@ def setup_logger(*, verbose: bool) -> None:
     )
 
 
-def read_gene_list(*, gene_list_tsv: str) -> pd.DataFrame:
-    """Read the input gene list TSV and validate required columns."""
-    df = pd.read_csv(gene_list_tsv, sep="\t", dtype=str).fillna("")
-    if "gene_key" not in df.columns:
-        raise ValueError("Input gene list must contain a 'gene_key' column.")
-    df["gene_key"] = df["gene_key"].astype(str).str.strip()
-    df = df[df["gene_key"] != ""].drop_duplicates(subset=["gene_key"]).copy()
-    return df
+def open_maybe_gzip(path: str):
+    """
+    Open a text file that may be gzipped.
 
+    Parameters
+    ----------
+    path
+        Path to file, possibly ending in .gz
 
-def _open_maybe_gzip(*, path: str):
-    """Open a file that may be gzipped."""
+    Returns
+    -------
+    file handle
+        Text mode handle.
+    """
     if path.endswith(".gz"):
         return gzip.open(path, "rt")
     return open(path, "rt", encoding="utf-8")
 
 
-def parse_gtf_genes(*, gencode_gtf: str) -> pd.DataFrame:
+def parse_gtf_attributes(attrs: str) -> Dict[str, str]:
     """
-    Parse a GENCODE GTF and return a DataFrame of gene records.
+    Parse a GTF attributes column into a dictionary.
 
-    The output coordinates are converted to 0-based, half-open intervals.
+    Parameters
+    ----------
+    attrs
+        The 9th column of a GTF row.
+
+    Returns
+    -------
+    dict
+        Mapping of attribute keys to values.
     """
-    records: List[Dict[str, object]] = []
-    with _open_maybe_gzip(path=gencode_gtf) as handle:
-        for line in handle:
-            if not line or line.startswith("#"):
-                continue
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 9:
-                continue
-            chrom, source, feature, start, end, score, strand, frame, attrs = parts
-            if feature != "gene":
-                continue
-            if strand not in {"+", "-"}:
-                continue
-
-            # Convert to 0-based half-open
-            try:
-                start_1 = int(start)
-                end_1 = int(end)
-            except ValueError:
-                continue
-            start0 = start_1 - 1
-            end0 = end_1  # inclusive end in GTF becomes exclusive end in half-open
-
-            attr_map = parse_gtf_attributes(attrs)
-            gene_id = str(attr_map.get("gene_id", "")).strip()
-            gene_name = str(attr_map.get("gene_name", "")).strip()
-
-            if gene_id == "" or gene_name == "":
-                continue
-            if not chrom.startswith("chr"):
-                # GENCODE "chr" GTF should already be chr-prefixed, but keep robust.
-                chrom = f"chr{chrom}"
-
-            records.append(
-                {
-                    "Chromosome": chrom,
-                    "Start": start0,
-                    "End": end0,
-                    "Strand": strand,
-                    "gene_id": gene_id,
-                    "gene_name": gene_name,
-                }
-            )
-
-    df = pd.DataFrame.from_records(records)
-    if df.empty:
-        raise ValueError("No gene records found in GTF. Check the input file.")
-    return df
-
-
-def parse_gtf_attributes(*, attrs: str) -> Dict[str, str]:
-    """Parse GTF attribute column into a dictionary."""
     out: Dict[str, str] = {}
     for item in attrs.strip().split(";"):
         item = item.strip()
@@ -199,42 +172,181 @@ def parse_gtf_attributes(*, attrs: str) -> Dict[str, str]:
         if " " not in item:
             continue
         key, value = item.split(" ", 1)
-        value = value.strip().strip('"')
-        out[key] = value
+        out[key] = value.strip().strip('"')
     return out
 
 
-def filter_standard_chromosomes(*, df: pd.DataFrame) -> pd.DataFrame:
-    """Keep standard chromosomes chr1-22, chrX, chrY."""
-    keep = {f"chr{i}" for i in range(1, 23)} | {"chrX", "chrY"}
-    return df[df["Chromosome"].isin(keep)].copy()
+def normalise_chrom(chrom: str) -> str:
+    """
+    Normalise chromosome names to UCSC-style chr-prefixed.
+
+    Parameters
+    ----------
+    chrom
+        Chromosome name from source.
+
+    Returns
+    -------
+    str
+        Chromosome name with chr prefix where appropriate.
+    """
+    c = str(chrom).strip()
+    if c.startswith("chr"):
+        return c
+    return f"chr{c}"
+
+
+def filter_standard_chromosomes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter to standard chromosomes chr1-22, chrX, chrY.
+
+    Parameters
+    ----------
+    df
+        DataFrame with a 'Chromosome' column.
+
+    Returns
+    -------
+    pd.DataFrame
+        Filtered DataFrame.
+    """
+    return df[df["Chromosome"].isin(STD_CHROMS)].copy()
+
+
+def read_gene_list(gene_list_tsv: str) -> pd.DataFrame:
+    """
+    Read input gene list TSV.
+
+    Parameters
+    ----------
+    gene_list_tsv
+        Path to TSV containing column 'gene_key' (HGNC-like symbols).
+
+    Returns
+    -------
+    pd.DataFrame
+        Input genes, deduplicated and stripped.
+    """
+    df = pd.read_csv(gene_list_tsv, sep="\t", dtype=str).fillna("")
+    if "gene_key" not in df.columns:
+        raise ValueError("Input gene list must contain a 'gene_key' column.")
+    df["gene_key"] = df["gene_key"].astype(str).str.strip()
+    df = df[df["gene_key"] != ""].drop_duplicates(subset=["gene_key"]).copy()
+    logging.info("Loaded %s unique gene_key entries", df.shape[0])
+    return df
+
+
+def parse_gtf_genes(gencode_gtf: str) -> pd.DataFrame:
+    """
+    Parse gene records from a GENCODE GTF.
+
+    Parameters
+    ----------
+    gencode_gtf
+        Path to a GTF (gz ok).
+
+    Returns
+    -------
+    pd.DataFrame
+        Gene table with 0-based half-open intervals and columns:
+        Chromosome, Start, End, Strand, gene_id, gene_name.
+    """
+    records: List[Dict[str, object]] = []
+    n_lines = 0
+    n_genes = 0
+
+    with open_maybe_gzip(gencode_gtf) as handle:
+        for line in handle:
+            n_lines += 1
+            if not line or line.startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 9:
+                continue
+
+            chrom, _source, feature, start, end, _score, strand, _frame, attrs = parts
+            if feature != "gene":
+                continue
+            if strand not in {"+", "-"}:
+                continue
+
+            try:
+                start_1 = int(start)
+                end_1 = int(end)
+            except ValueError:
+                continue
+
+            attr_map = parse_gtf_attributes(attrs=attrs)
+            gene_id = str(attr_map.get("gene_id", "")).strip()
+            gene_name = str(attr_map.get("gene_name", "")).strip()
+            if gene_id == "" or gene_name == "":
+                continue
+
+            start0 = start_1 - 1
+            end0 = end_1
+
+            chrom_norm = normalise_chrom(chrom=chrom)
+
+            records.append(
+                {
+                    "Chromosome": chrom_norm,
+                    "Start": int(start0),
+                    "End": int(end0),
+                    "Strand": strand,
+                    "gene_id": gene_id,
+                    "gene_name": gene_name,
+                }
+            )
+            n_genes += 1
+
+            if n_genes % 250000 == 0:
+                logging.info("Parsed %s gene records so far...", n_genes)
+
+    df = pd.DataFrame.from_records(records)
+    if df.empty:
+        raise ValueError("No gene records parsed from GTF. Check file.")
+    df = filter_standard_chromosomes(df=df)
+    logging.info(
+        "Parsed %s gene records from GTF (%s lines scanned). After chr filter: %s",
+        n_genes,
+        n_lines,
+        df.shape[0],
+    )
+    return df
 
 
 def map_gene_symbols_to_gencode(
-    *, gene_list: pd.DataFrame, gencode_genes: pd.DataFrame
+    gene_list: pd.DataFrame,
+    gencode_genes: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Map HGNC gene symbols to GENCODE genes using gene_name.
+    Map input gene symbols to GENCODE genes via gene_name.
+
+    Parameters
+    ----------
+    gene_list
+        DataFrame containing 'gene_key' column.
+    gencode_genes
+        Parsed GENCODE gene records.
 
     Returns
     -------
     mapped_df
-        Rows for genes that mapped uniquely (gene_key -> gene_id).
+        Mapped gene table with unique mappings.
     report_df
-        Mapping report including unmapped and ambiguous entries.
+        Mapping report with statuses: mapped, unmapped, ambiguous.
     """
     gencode = gencode_genes.copy()
     gencode["gene_name_upper"] = gencode["gene_name"].astype(str).str.upper()
 
-    input_df = gene_list.copy()
-    input_df["gene_key_upper"] = input_df["gene_key"].astype(str).str.upper()
+    inp = gene_list.copy()
+    inp["gene_key_upper"] = inp["gene_key"].astype(str).str.upper()
 
-    merged = input_df.merge(
+    merged = inp.merge(
         gencode,
         how="left",
         left_on="gene_key_upper",
         right_on="gene_name_upper",
-        suffixes=("", "_gencode"),
     )
 
     report_rows: List[Dict[str, object]] = []
@@ -269,8 +381,7 @@ def map_gene_symbols_to_gencode(
             )
             continue
 
-        # Unique mapping
-        one = hits.iloc[0].to_dict()
+        one = hits.iloc[0]
         report_rows.append(
             {
                 "gene_key": gene_key_str,
@@ -294,14 +405,33 @@ def map_gene_symbols_to_gencode(
 
     mapped_df = pd.DataFrame(mapped_rows)
     report_df = pd.DataFrame(report_rows)
+
+    logging.info(
+        "Mapping summary: mapped=%s, unmapped=%s, ambiguous=%s",
+        int((report_df["status"] == "mapped").sum()),
+        int((report_df["status"] == "unmapped").sum()),
+        int((report_df["status"] == "ambiguous").sum()),
+    )
     return mapped_df, report_df
 
 
-def build_gene_records(*, mapped_df: pd.DataFrame) -> List[GeneRecord]:
-    """Convert mapped gene DataFrame rows to GeneRecord objects."""
-    records: List[GeneRecord] = []
+def build_gene_records(mapped_df: pd.DataFrame) -> List[GeneRecord]:
+    """
+    Build GeneRecord list from mapped gene table.
+
+    Parameters
+    ----------
+    mapped_df
+        DataFrame returned by map_gene_symbols_to_gencode().
+
+    Returns
+    -------
+    list of GeneRecord
+        Mapped gene records.
+    """
+    genes: List[GeneRecord] = []
     for row in mapped_df.itertuples(index=False):
-        records.append(
+        genes.append(
             GeneRecord(
                 gene_id=str(row.gene_id),
                 gene_name=str(row.gene_name),
@@ -311,11 +441,23 @@ def build_gene_records(*, mapped_df: pd.DataFrame) -> List[GeneRecord]:
                 strand=str(row.Strand),
             )
         )
-    return records
+    return genes
 
 
-def make_tss_ranges(*, genes: Sequence[GeneRecord]) -> pr.PyRanges:
-    """Create 1-bp PyRanges at each gene TSS."""
+def make_tss_ranges(genes: Sequence[GeneRecord]) -> pr.PyRanges:
+    """
+    Create 1-bp PyRanges intervals at each gene TSS.
+
+    Parameters
+    ----------
+    genes
+        GeneRecord objects.
+
+    Returns
+    -------
+    pr.PyRanges
+        TSS intervals with 'gene_id' column.
+    """
     rows = []
     for g in genes:
         tss = int(g.tss)
@@ -323,23 +465,39 @@ def make_tss_ranges(*, genes: Sequence[GeneRecord]) -> pr.PyRanges:
     return pr.PyRanges(pd.DataFrame(rows))
 
 
-def make_gene_body_ranges(*, genes: Sequence[GeneRecord]) -> pr.PyRanges:
-    """Create PyRanges spanning each gene body."""
+def make_gene_body_ranges(genes: Sequence[GeneRecord]) -> pr.PyRanges:
+    """
+    Create PyRanges intervals spanning each gene body.
+
+    Parameters
+    ----------
+    genes
+        GeneRecord objects.
+
+    Returns
+    -------
+    pr.PyRanges
+        Gene body intervals with 'gene_id' column.
+    """
     rows = []
     for g in genes:
-        rows.append(
-            {"Chromosome": g.chrom, "Start": g.start, "End": g.end, "gene_id": g.gene_id}
-        )
+        rows.append({"Chromosome": g.chrom, "Start": g.start, "End": g.end, "gene_id": g.gene_id})
     return pr.PyRanges(pd.DataFrame(rows))
 
 
-def compute_nearest_gene_distance_tss(
-    *, genes: Sequence[GeneRecord]
-) -> pd.Series:
+def compute_nearest_gene_distance_tss(genes: Sequence[GeneRecord]) -> pd.Series:
     """
     Compute nearest neighbour distance between TSS positions (bp), per chromosome.
 
-    Returns a Series indexed by gene_id.
+    Parameters
+    ----------
+    genes
+        GeneRecord objects.
+
+    Returns
+    -------
+    pd.Series
+        Nearest neighbour distances, indexed by gene_id.
     """
     by_chr: Dict[str, List[Tuple[str, int]]] = {}
     for g in genes:
@@ -351,11 +509,10 @@ def compute_nearest_gene_distance_tss(
         positions = np.array([p for _, p in items_sorted], dtype=int)
         gene_ids = [gid for gid, _ in items_sorted]
 
-        if len(positions) == 1:
+        if positions.size == 1:
             out[gene_ids[0]] = float("nan")
             continue
 
-        # Nearest distance is min of adjacent diffs in sorted order.
         diffs = np.diff(positions)
         left = np.concatenate(([np.iinfo(np.int64).max], diffs))
         right = np.concatenate((diffs, [np.iinfo(np.int64).max]))
@@ -364,43 +521,81 @@ def compute_nearest_gene_distance_tss(
         for gid, d in zip(gene_ids, nearest):
             out[gid] = float(d)
 
-    return pd.Series(out, name="nn_dist_tss_bp")
+    s = pd.Series(out, name="nn_dist_tss_bp")
+    logging.info("Nearest neighbour distances computed for %s genes", s.shape[0])
+    return s
 
 
-def make_windows_around_points(
-    *, points_pr: pr.PyRanges, window_bp: int, label: str
-) -> pr.PyRanges:
-    """Create symmetric windows of size +/- window_bp around 1-bp point ranges."""
+def make_windows_around_points(points_pr: pr.PyRanges, window_bp: int) -> pr.PyRanges:
+    """
+    Create symmetric windows +/- window_bp around 1-bp point ranges.
+
+    Parameters
+    ----------
+    points_pr
+        1-bp point intervals (e.g., TSS positions).
+    window_bp
+        Window radius in base pairs.
+
+    Returns
+    -------
+    pr.PyRanges
+        Window intervals (clipped at 0).
+    """
     df = points_pr.df.copy()
-    df["Start"] = (df["Start"] - window_bp).clip(lower=0).astype(int)
-    df["End"] = (df["End"] + window_bp).astype(int)
-    df["window_label"] = label
+    df["Start"] = (df["Start"] - int(window_bp)).clip(lower=0).astype(int)
+    df["End"] = (df["End"] + int(window_bp)).astype(int)
     return pr.PyRanges(df)
 
 
 def compute_gene_density(
-    *, tss_pr: pr.PyRanges, all_genes_pr: pr.PyRanges, windows_bp: Sequence[int]
+    tss_pr: pr.PyRanges,
+    all_genes_pr: pr.PyRanges,
+    windows_bp: Sequence[int],
 ) -> pd.DataFrame:
     """
     Compute counts of genes within windows around each TSS.
 
     Counts include the gene itself; we subtract 1 to exclude self.
+
+    Parameters
+    ----------
+    tss_pr
+        TSS PyRanges with 'gene_id'.
+    all_genes_pr
+        All genes PyRanges with 'gene_id'.
+    windows_bp
+        Sequence of window radii.
+
+    Returns
+    -------
+    pd.DataFrame
+        gene_id plus gene_count_tss_pm_* columns.
     """
     out = pd.DataFrame({"gene_id": tss_pr.df["gene_id"].astype(str)})
     for w in windows_bp:
-        win = make_windows_around_points(points_pr=tss_pr, window_bp=int(w), label=f"tss_pm_{w}")
+        win = make_windows_around_points(points_pr=tss_pr, window_bp=int(w))
         counts = win.count_overlaps(all_genes_pr).df[["gene_id", "NumberOverlaps"]].copy()
         counts["NumberOverlaps"] = counts["NumberOverlaps"].astype(int) - 1
         counts = counts.rename(columns={"NumberOverlaps": f"gene_count_tss_pm_{w}"})
         out = out.merge(counts, how="left", on="gene_id")
+        logging.debug("Gene density computed for window ±%s bp", w)
     return out
 
 
-def parse_rmsk_table(*, rmsk_tsv_gz: str) -> pd.DataFrame:
+def parse_rmsk_table(rmsk_tsv_gz: str) -> pd.DataFrame:
     """
-    Parse UCSC rmsk.txt.gz into a DataFrame with standard interval columns.
+    Parse UCSC rmsk.txt.gz into a DataFrame with interval columns.
 
-    Coordinates in UCSC tables are already 0-based, half-open.
+    Parameters
+    ----------
+    rmsk_tsv_gz
+        Path to UCSC rmsk.txt.gz
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: Chromosome, Start, End, repClass
     """
     cols = [
         "bin",
@@ -430,92 +625,72 @@ def parse_rmsk_table(*, rmsk_tsv_gz: str) -> pd.DataFrame:
         dtype={"genoName": str, "repClass": str},
         low_memory=False,
     )
-    df = df.rename(
-        columns={"genoName": "Chromosome", "genoStart": "Start", "genoEnd": "End"}
-    )
-    df["Chromosome"] = df["Chromosome"].astype(str)
+    df = df.rename(columns={"genoName": "Chromosome", "genoStart": "Start", "genoEnd": "End"})
+    df["Chromosome"] = df["Chromosome"].astype(str).map(normalise_chrom)
     df = filter_standard_chromosomes(df=df)
     df["repClass"] = df["repClass"].astype(str).str.split("/").str[0]
-    return df[["Chromosome", "Start", "End", "repClass"]].copy()
+    out = df[["Chromosome", "Start", "End", "repClass"]].copy()
+    logging.info("Loaded repeats: %s rows (std chroms)", out.shape[0])
+    return out
 
 
-def parse_segdup_table(*, segdup_tsv_gz: str) -> pd.DataFrame:
+def parse_segdup_table(segdup_tsv_gz: str) -> pd.DataFrame:
     """
     Parse UCSC genomicSuperDups.txt.gz into a DataFrame with interval columns.
 
-    Coordinates in UCSC tables are 0-based, half-open.
+    Parameters
+    ----------
+    segdup_tsv_gz
+        Path to UCSC genomicSuperDups.txt.gz
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: Chromosome, Start, End
     """
-    # The table has many columns; we need chrom/start/end at minimum.
-    # UCSC order begins: bin, chrom, chromStart, chromEnd, name, score, ...
-    df = pd.read_csv(
-        segdup_tsv_gz,
-        sep="\t",
-        header=None,
-        compression="gzip",
-        low_memory=False,
-    )
+    df = pd.read_csv(segdup_tsv_gz, sep="\t", header=None, compression="gzip", low_memory=False)
     if df.shape[1] < 4:
         raise ValueError("Segmental duplication table has unexpected format.")
     df = df.rename(columns={1: "Chromosome", 2: "Start", 3: "End"})
-    df["Chromosome"] = df["Chromosome"].astype(str)
+    df["Chromosome"] = df["Chromosome"].astype(str).map(normalise_chrom)
+    df["Start"] = pd.to_numeric(df["Start"], errors="coerce").fillna(0).astype(int)
+    df["End"] = pd.to_numeric(df["End"], errors="coerce").fillna(0).astype(int)
     df = filter_standard_chromosomes(df=df)
-    df["Start"] = df["Start"].astype(int)
-    df["End"] = df["End"].astype(int)
-    return df[["Chromosome", "Start", "End"]].copy()
-
-
-def compute_distance_to_nearest(
-    *, query_pr: pr.PyRanges, subject_pr: pr.PyRanges, suffix: str
-) -> pd.Series:
-    """
-    Compute distance from each query interval to nearest subject interval.
-
-    Uses midpoints of query intervals for a stable distance estimate.
-    """
-    qdf = query_pr.df.copy()
-    qdf["q_mid"] = ((qdf["Start"] + qdf["End"]) / 2.0).astype(float)
-
-    sdf = subject_pr.df.copy()
-    sdf["s_mid"] = ((sdf["Start"] + sdf["End"]) / 2.0).astype(float)
-
-    # Use pyranges nearest on intervals; distance is computed on interval edges.
-    # To approximate midpoint-to-interval distance, we keep it simple and use the
-    # interval-based distance; this is acceptable for large windows and nearest
-    # proximity features.
-    nearest = query_pr.nearest(subject_pr, how="any")
-    ndf = nearest.df.copy()
-    # pyranges returns Distance if it can compute it; if not present, we compute a fallback.
-    if "Distance" not in ndf.columns:
-        # Fallback: distance between starts (rough)
-        ndf["Distance"] = (ndf["Start"] - ndf["Start_b"]).abs()
-    out = ndf[["gene_id", "Distance"]].copy()
-    out = out.groupby("gene_id", as_index=False)["Distance"].min()
-    out = out.set_index("gene_id")["Distance"].astype(float)
-    out.name = f"dist_nearest_{suffix}_bp"
+    out = df[["Chromosome", "Start", "End"]].copy()
+    logging.info("Loaded segmental duplications: %s rows (std chroms)", out.shape[0])
     return out
 
 
 def compute_repeat_fraction_in_windows(
-    *,
     tss_pr: pr.PyRanges,
     repeats_pr: pr.PyRanges,
     windows_bp: Sequence[int],
-    prefix: str,
 ) -> pd.DataFrame:
     """
-    Compute fraction of bases covered by repeats in windows around TSS.
+    Compute fraction of bases covered by repeats in windows around each TSS.
 
-    Returns a DataFrame with gene_id and one column per window.
+    Parameters
+    ----------
+    tss_pr
+        TSS PyRanges (1 bp intervals) with gene_id.
+    repeats_pr
+        Repeats PyRanges.
+    windows_bp
+        Window radii.
+
+    Returns
+    -------
+    pd.DataFrame
+        gene_id plus repeat_frac_tss_pm_* columns.
     """
     out = pd.DataFrame({"gene_id": tss_pr.df["gene_id"].astype(str)})
 
     for w in windows_bp:
-        win = make_windows_around_points(points_pr=tss_pr, window_bp=int(w), label=f"{prefix}_{w}")
-        # Compute total overlap length between each window and repeats
+        win = make_windows_around_points(points_pr=tss_pr, window_bp=int(w))
         joined = win.join(repeats_pr)
         if joined.df.empty:
-            frac = pd.DataFrame({"gene_id": win.df["gene_id"].astype(str), f"repeat_frac_tss_pm_{w}": 0.0})
-            out = out.merge(frac, how="left", on="gene_id")
+            out[f"repeat_frac_tss_pm_{w}"] = 0.0
+            logging.debug("No repeat overlaps found for window ±%s bp", w)
             continue
 
         jdf = joined.df.copy()
@@ -529,24 +704,75 @@ def compute_repeat_fraction_in_windows(
         sums[f"repeat_frac_tss_pm_{w}"] = (sums["overlap_len"] / window_size).clip(0.0, 1.0)
         sums = sums[["gene_id", f"repeat_frac_tss_pm_{w}"]]
         out = out.merge(sums, how="left", on="gene_id")
-
         out[f"repeat_frac_tss_pm_{w}"] = out[f"repeat_frac_tss_pm_{w}"].fillna(0.0)
+
+        logging.debug("Repeat fraction computed for window ±%s bp", w)
 
     return out
 
 
-def compute_segdup_overlap_fraction(
-    *, gene_body_pr: pr.PyRanges, segdup_pr: pr.PyRanges
+def compute_distance_to_nearest(
+    query_pr: pr.PyRanges,
+    subject_pr: pr.PyRanges,
+    out_name: str,
 ) -> pd.Series:
-    """Compute fraction of each gene body overlapped by segmental duplications."""
+    """
+    Compute distance from each query interval to the nearest subject interval.
+
+    Parameters
+    ----------
+    query_pr
+        Query PyRanges with 'gene_id'.
+    subject_pr
+        Subject PyRanges.
+    out_name
+        Name of the output Series.
+
+    Returns
+    -------
+    pd.Series
+        Distances in bp indexed by gene_id.
+    """
+    nearest = query_pr.nearest(subject_pr, how="any")
+    ndf = nearest.df.copy()
+
+    if ndf.empty:
+        gene_ids = query_pr.df["gene_id"].astype(str).tolist()
+        return pd.Series({gid: float("nan") for gid in gene_ids}, name=out_name, dtype=float)
+
+    if "Distance" not in ndf.columns:
+        ndf["Distance"] = (ndf["Start"] - ndf["Start_b"]).abs()
+
+    dist = ndf.groupby("gene_id", as_index=False)["Distance"].min()
+    s = dist.set_index("gene_id")["Distance"].astype(float)
+    s.name = out_name
+    return s
+
+
+def compute_segdup_overlap_fraction(
+    gene_body_pr: pr.PyRanges,
+    segdup_pr: pr.PyRanges,
+) -> pd.Series:
+    """
+    Compute fraction of each gene body overlapped by segmental duplications.
+
+    Parameters
+    ----------
+    gene_body_pr
+        Gene body intervals with gene_id.
+    segdup_pr
+        Segmental duplication intervals.
+
+    Returns
+    -------
+    pd.Series
+        Overlap fraction per gene_id.
+    """
     joined = gene_body_pr.join(segdup_pr)
+    gene_ids = gene_body_pr.df["gene_id"].astype(str).tolist()
+
     if joined.df.empty:
-        s = pd.Series(
-            data={gid: 0.0 for gid in gene_body_pr.df["gene_id"].astype(str).tolist()},
-            name="segdup_overlap_frac_gene_body",
-            dtype=float,
-        )
-        return s
+        return pd.Series({gid: 0.0 for gid in gene_ids}, name="segdup_overlap_frac_gene_body", dtype=float)
 
     jdf = joined.df.copy()
     overlap_start = np.maximum(jdf["Start"].to_numpy(), jdf["Start_b"].to_numpy())
@@ -557,43 +783,102 @@ def compute_segdup_overlap_fraction(
     sums = jdf.groupby("gene_id", as_index=False)["overlap_len"].sum()
     gdf = gene_body_pr.df[["gene_id", "Start", "End"]].copy()
     gdf["gene_len"] = (gdf["End"] - gdf["Start"]).astype(float).replace(0.0, np.nan)
+
     merged = gdf.merge(sums, how="left", on="gene_id").fillna({"overlap_len": 0.0})
-    merged["segdup_overlap_frac_gene_body"] = (merged["overlap_len"] / merged["gene_len"]).fillna(0.0).clip(0.0, 1.0)
-    out = merged.set_index("gene_id")["segdup_overlap_frac_gene_body"].astype(float)
-    out.name = "segdup_overlap_frac_gene_body"
-    return out
+    merged["segdup_overlap_frac_gene_body"] = (
+        (merged["overlap_len"] / merged["gene_len"]).fillna(0.0).clip(0.0, 1.0)
+    )
+    s = merged.set_index("gene_id")["segdup_overlap_frac_gene_body"].astype(float)
+    s.name = "segdup_overlap_frac_gene_body"
+    return s
 
 
-def load_fasta(*, hg38_fasta: str) -> Fasta:
-    """Load FASTA with pyfaidx; creates an index if missing."""
-    return Fasta(hg38_fasta, as_raw=True, sequence_always_upper=True)
+def load_fasta(hg38_fasta: str) -> Fasta:
+    """
+    Load FASTA with pyfaidx.
+
+    Parameters
+    ----------
+    hg38_fasta
+        Path to hg38 FASTA (gz ok).
+
+    Returns
+    -------
+    Fasta
+        pyfaidx Fasta object.
+    """
+    fasta = Fasta(hg38_fasta, as_raw=True, sequence_always_upper=True)
+    logging.info("FASTA loaded with %s contigs", len(list(fasta.keys())))
+    return fasta
 
 
-def get_chrom_lengths(*, fasta: Fasta) -> Dict[str, int]:
-    """Return chromosome lengths from FASTA index."""
+def get_chrom_lengths(fasta: Fasta) -> Dict[str, int]:
+    """
+    Get chromosome lengths from FASTA.
+
+    Parameters
+    ----------
+    fasta
+        pyfaidx FASTA object.
+
+    Returns
+    -------
+    dict
+        Chromosome length mapping.
+    """
     lengths: Dict[str, int] = {}
     for chrom in fasta.keys():
         lengths[str(chrom)] = len(fasta[str(chrom)])
     return lengths
 
 
-def compute_gc_percent(*, seq: str) -> float:
-    """Compute GC% over A/C/G/T bases, ignoring N and other characters."""
+def compute_gc_percent(seq: str) -> float:
+    """
+    Compute GC% over A/C/G/T bases, ignoring N/other.
+
+    Parameters
+    ----------
+    seq
+        DNA sequence string.
+
+    Returns
+    -------
+    float
+        GC percentage.
+    """
     if not seq:
         return float("nan")
-    seq_u = seq.upper()
-    a = seq_u.count("A")
-    c = seq_u.count("C")
-    g = seq_u.count("G")
-    t = seq_u.count("T")
+    s = seq.upper()
+    a = s.count("A")
+    c = s.count("C")
+    g = s.count("G")
+    t = s.count("T")
     denom = a + c + g + t
     if denom == 0:
         return float("nan")
     return 100.0 * float(c + g) / float(denom)
 
 
-def safe_fetch_seq(*, fasta: Fasta, chrom: str, start: int, end: int) -> str:
-    """Fetch sequence from FASTA, clipping to chromosome bounds."""
+def safe_fetch_seq(fasta: Fasta, chrom: str, start: int, end: int) -> str:
+    """
+    Fetch sequence from FASTA, clipping to chromosome bounds.
+
+    Parameters
+    ----------
+    fasta
+        pyfaidx FASTA.
+    chrom
+        Chromosome name (must match FASTA keys).
+    start
+        0-based start.
+    end
+        0-based end (exclusive).
+
+    Returns
+    -------
+    str
+        Sequence (may be empty if unavailable).
+    """
     if chrom not in fasta.keys():
         return ""
     chrom_len = len(fasta[chrom])
@@ -605,11 +890,29 @@ def safe_fetch_seq(*, fasta: Fasta, chrom: str, start: int, end: int) -> str:
 
 
 def compute_gc_features(
-    *, genes: Sequence[GeneRecord], fasta: Fasta, flank_windows_bp: Sequence[int]
+    genes: Sequence[GeneRecord],
+    fasta: Fasta,
+    flank_windows_bp: Sequence[int],
 ) -> pd.DataFrame:
-    """Compute GC% for gene body and flanking windows around TSS."""
+    """
+    Compute GC% for gene body and flanks around TSS.
+
+    Parameters
+    ----------
+    genes
+        GeneRecord objects.
+    fasta
+        FASTA object.
+    flank_windows_bp
+        Radii for TSS flanks.
+
+    Returns
+    -------
+    pd.DataFrame
+        GC features per gene_id.
+    """
     rows: List[Dict[str, object]] = []
-    for g in genes:
+    for i, g in enumerate(genes, start=1):
         gene_seq = safe_fetch_seq(fasta=fasta, chrom=g.chrom, start=g.start, end=g.end)
         row: Dict[str, object] = {
             "gene_id": g.gene_id,
@@ -617,18 +920,35 @@ def compute_gc_features(
         }
         tss = int(g.tss)
         for w in flank_windows_bp:
-            start = tss - int(w)
-            end = tss + int(w) + 1
-            flank_seq = safe_fetch_seq(fasta=fasta, chrom=g.chrom, start=start, end=end)
+            flank_seq = safe_fetch_seq(fasta=fasta, chrom=g.chrom, start=tss - int(w), end=tss + int(w) + 1)
             row[f"gc_tss_pm_{w}_pct"] = compute_gc_percent(seq=flank_seq)
         rows.append(row)
+
+        if i % 500 == 0:
+            logging.info("GC computed for %s/%s genes", i, len(genes))
+
     return pd.DataFrame(rows)
 
 
 def compute_subtelomeric_features(
-    *, genes: Sequence[GeneRecord], chrom_lengths: Dict[str, int]
+    genes: Sequence[GeneRecord],
+    chrom_lengths: Dict[str, int],
 ) -> pd.DataFrame:
-    """Compute distance to nearest chromosome end and subtelomeric flags."""
+    """
+    Compute distance to nearest chromosome end and subtelomeric flags.
+
+    Parameters
+    ----------
+    genes
+        GeneRecord objects.
+    chrom_lengths
+        Chromosome lengths.
+
+    Returns
+    -------
+    pd.DataFrame
+        Subtelomeric features per gene_id.
+    """
     rows: List[Dict[str, object]] = []
     for g in genes:
         chrom_len = int(chrom_lengths.get(g.chrom, 0))
@@ -640,29 +960,56 @@ def compute_subtelomeric_features(
             dist_right = float(max(0, chrom_len - (tss + 1)))
             dist_end = float(min(dist_left, dist_right))
 
-        row: Dict[str, object] = {
-            "gene_id": g.gene_id,
-            "dist_to_chr_end_bp": dist_end,
-        }
+        row: Dict[str, object] = {"gene_id": g.gene_id, "dist_to_chr_end_bp": dist_end}
         for thr in SUBTELO_THRESHOLDS_BP:
-            key = f"is_within_{thr}_bp_of_chr_end"
-            row[key] = bool(not math.isnan(dist_end) and dist_end <= float(thr))
+            row[f"is_within_{thr}_bp_of_chr_end"] = bool(not math.isnan(dist_end) and dist_end <= float(thr))
         rows.append(row)
+
     return pd.DataFrame(rows)
 
 
-def open_bigwig(*, recomb_bw: str):
-    """Open a bigWig file with pyBigWig."""
+def open_bigwig(recomb_bw: str):
+    """
+    Open a bigWig file.
+
+    Parameters
+    ----------
+    recomb_bw
+        Path to bigWig.
+
+    Returns
+    -------
+    pyBigWig.BigWigFile
+        Open bigWig handle.
+    """
     bw = pyBigWig.open(recomb_bw)
     if bw is None:
-        raise ValueError("Failed to open recombination bigWig.")
+        raise ValueError(f"Failed to open bigWig: {recomb_bw}")
     return bw
 
 
-def bw_stats(
-    *, bw, chrom: str, start: int, end: int, stat: str
-) -> float:
-    """Get a bigWig summary statistic; returns NaN if unavailable."""
+def bw_stat(bw, chrom: str, start: int, end: int, stat: str) -> float:
+    """
+    Compute a bigWig summary statistic, returning NaN if missing.
+
+    Parameters
+    ----------
+    bw
+        Open bigWig handle.
+    chrom
+        Chromosome name.
+    start
+        Start coordinate.
+    end
+        End coordinate.
+    stat
+        Statistic type supported by pyBigWig (mean, max, min, etc.).
+
+    Returns
+    -------
+    float
+        Statistic value or NaN.
+    """
     try:
         vals = bw.stats(chrom, int(start), int(end), type=stat)
     except RuntimeError:
@@ -673,35 +1020,67 @@ def bw_stats(
 
 
 def compute_recombination_features(
-    *, genes: Sequence[GeneRecord], recomb_bw: str, windows_bp: Sequence[int]
+    genes: Sequence[GeneRecord],
+    recomb_bw: str,
+    windows_bp: Sequence[int],
 ) -> pd.DataFrame:
-    """Compute recombination mean/max in windows around TSS and at TSS."""
+    """
+    Compute recombination statistics in windows around each TSS.
+
+    Parameters
+    ----------
+    genes
+        GeneRecord objects.
+    recomb_bw
+        Path to recombination bigWig (recombAvg.bw).
+    windows_bp
+        Radii for windows around TSS.
+
+    Returns
+    -------
+    pd.DataFrame
+        Recombination features per gene_id.
+    """
     bw = open_bigwig(recomb_bw=recomb_bw)
     rows: List[Dict[str, object]] = []
     try:
-        for g in genes:
+        for i, g in enumerate(genes, start=1):
             tss = int(g.tss)
             row: Dict[str, object] = {"gene_id": g.gene_id}
-            row["recomb_at_tss_mean"] = bw_stats(
-                bw=bw, chrom=g.chrom, start=tss, end=tss + 1, stat="mean"
-            )
+            row["recomb_at_tss_mean"] = bw_stat(bw=bw, chrom=g.chrom, start=tss, end=tss + 1, stat="mean")
+
             for w in windows_bp:
                 start = max(0, tss - int(w))
                 end = tss + int(w) + 1
-                row[f"recomb_tss_pm_{w}_mean"] = bw_stats(
-                    bw=bw, chrom=g.chrom, start=start, end=end, stat="mean"
-                )
-                row[f"recomb_tss_pm_{w}_max"] = bw_stats(
-                    bw=bw, chrom=g.chrom, start=start, end=end, stat="max"
-                )
+                row[f"recomb_tss_pm_{w}_mean"] = bw_stat(bw=bw, chrom=g.chrom, start=start, end=end, stat="mean")
+                row[f"recomb_tss_pm_{w}_max"] = bw_stat(bw=bw, chrom=g.chrom, start=start, end=end, stat="max")
+
             rows.append(row)
+
+            if i % 1000 == 0:
+                logging.info("Recombination computed for %s/%s genes", i, len(genes))
     finally:
         bw.close()
+
     return pd.DataFrame(rows)
 
 
+def write_tsv(df: pd.DataFrame, path: str) -> None:
+    """
+    Write a DataFrame to TSV.
+
+    Parameters
+    ----------
+    df
+        DataFrame to write.
+    path
+        Output path.
+    """
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    df.to_csv(path, sep="\t", index=False)
+
+
 def build_feature_table(
-    *,
     mapped_df: pd.DataFrame,
     all_genes_df: pd.DataFrame,
     rmsk_df: pd.DataFrame,
@@ -709,114 +1088,140 @@ def build_feature_table(
     fasta: Fasta,
     recomb_bw: str,
 ) -> pd.DataFrame:
-    """Compute all features and return a single merged DataFrame."""
+    """
+    Compute and merge all genomic context features.
+
+    Parameters
+    ----------
+    mapped_df
+        Mapped genes (unique).
+    all_genes_df
+        All genes DataFrame for density computations.
+    rmsk_df
+        RepeatMasker intervals.
+    segdup_df
+        Segmental duplication intervals.
+    fasta
+        FASTA object.
+    recomb_bw
+        Recombination bigWig.
+
+    Returns
+    -------
+    pd.DataFrame
+        Feature table per gene.
+    """
     genes = build_gene_records(mapped_df=mapped_df)
     logging.info("Computing features for %s mapped genes", len(genes))
 
-    # Base table
     base = mapped_df.copy()
     base["gene_length_bp"] = (base["End"] - base["Start"]).astype(int)
-    base["tss_0based"] = [
-        int(GeneRecord(
-            gene_id=str(r.gene_id),
-            gene_name=str(r.gene_name),
-            chrom=str(r.Chromosome),
-            start=int(r.Start),
-            end=int(r.End),
-            strand=str(r.Strand),
-        ).tss)
-        for r in base.itertuples(index=False)
-    ]
+    base["tss_0based"] = [int(g.tss) for g in genes]
 
-    # PyRanges objects
     all_genes_pr = pr.PyRanges(all_genes_df[["Chromosome", "Start", "End", "gene_id"]].copy())
     tss_pr = make_tss_ranges(genes=genes)
     gene_body_pr = make_gene_body_ranges(genes=genes)
 
-    # Nearest neighbour gene distance (TSS-based)
+    logging.info("Computing nearest neighbour TSS distances")
     nn_dist = compute_nearest_gene_distance_tss(genes=genes).reset_index()
     nn_dist = nn_dist.rename(columns={"index": "gene_id"})
     base = base.merge(nn_dist, how="left", on="gene_id")
 
-    # Gene density around TSS
+    logging.info("Computing gene density in windows around TSS")
     dens = compute_gene_density(tss_pr=tss_pr, all_genes_pr=all_genes_pr, windows_bp=WINDOWS_BP)
     base = base.merge(dens, how="left", on="gene_id")
 
-    # Repeats
+    logging.info("Computing repeat features")
     repeats_pr = pr.PyRanges(rmsk_df)
-    repeat_frac = compute_repeat_fraction_in_windows(
-        tss_pr=tss_pr, repeats_pr=repeats_pr, windows_bp=REPEAT_WINDOWS_BP, prefix="rmsk"
-    )
+    repeat_frac = compute_repeat_fraction_in_windows(tss_pr=tss_pr, repeats_pr=repeats_pr, windows_bp=REPEAT_WINDOWS_BP)
     base = base.merge(repeat_frac, how="left", on="gene_id")
 
-    # Distance to nearest repeat overall and by class
     base["dist_nearest_repeat_any_bp"] = compute_distance_to_nearest(
-        query_pr=tss_pr, subject_pr=repeats_pr, suffix="repeat_any"
+        query_pr=tss_pr,
+        subject_pr=repeats_pr,
+        out_name="dist_nearest_repeat_any_bp",
     ).reindex(base["gene_id"].astype(str)).to_numpy()
 
     for rep_class in REPEAT_CLASSES:
         sub_df = rmsk_df[rmsk_df["repClass"] == rep_class].copy()
+        col = f"dist_nearest_repeat_{rep_class.lower()}_bp"
         if sub_df.empty:
-            base[f"dist_nearest_repeat_{rep_class.lower()}_bp"] = np.nan
+            logging.warning("No repeats found for class %s; setting %s to NaN", rep_class, col)
+            base[col] = np.nan
             continue
         sub_pr = pr.PyRanges(sub_df[["Chromosome", "Start", "End"]].copy())
-        dist = compute_distance_to_nearest(
-            query_pr=tss_pr, subject_pr=sub_pr, suffix=f"repeat_{rep_class.lower()}"
-        )
-        base[f"dist_nearest_repeat_{rep_class.lower()}_bp"] = (
-            dist.reindex(base["gene_id"].astype(str)).to_numpy()
-        )
+        dist = compute_distance_to_nearest(query_pr=tss_pr, subject_pr=sub_pr, out_name=col)
+        base[col] = dist.reindex(base["gene_id"].astype(str)).to_numpy()
 
-    # Segmental duplications
+    logging.info("Computing segmental duplication features")
     segdup_pr = pr.PyRanges(segdup_df)
     seg_overlap = compute_segdup_overlap_fraction(gene_body_pr=gene_body_pr, segdup_pr=segdup_pr)
     base["segdup_overlap_frac_gene_body"] = seg_overlap.reindex(base["gene_id"].astype(str)).to_numpy()
 
     base["dist_nearest_segdup_bp"] = compute_distance_to_nearest(
-        query_pr=gene_body_pr, subject_pr=segdup_pr, suffix="segdup"
+        query_pr=gene_body_pr,
+        subject_pr=segdup_pr,
+        out_name="dist_nearest_segdup_bp",
     ).reindex(base["gene_id"].astype(str)).to_numpy()
 
-    # Subtelomeric
+    logging.info("Computing subtelomeric features")
     chrom_lengths = get_chrom_lengths(fasta=fasta)
     subtelo = compute_subtelomeric_features(genes=genes, chrom_lengths=chrom_lengths)
     base = base.merge(subtelo, how="left", on="gene_id")
 
-    # GC content
+    logging.info("Computing GC content features")
     gc_df = compute_gc_features(genes=genes, fasta=fasta, flank_windows_bp=REPEAT_WINDOWS_BP)
     base = base.merge(gc_df, how="left", on="gene_id")
 
-    # Recombination
+    logging.info("Computing recombination features")
     recomb_df = compute_recombination_features(genes=genes, recomb_bw=recomb_bw, windows_bp=WINDOWS_BP)
     base = base.merge(recomb_df, how="left", on="gene_id")
 
+    logging.info("Feature table complete: %s rows, %s columns", base.shape[0], base.shape[1])
     return base
 
 
-def write_tsv(*, df: pd.DataFrame, path: str) -> None:
-    """Write a DataFrame as TSV, creating parent directories if needed."""
-    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-    df.to_csv(path, sep="\t", index=False)
-
-
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
-    """Parse CLI arguments."""
-    parser = argparse.ArgumentParser(
-        description="Build per-gene genomic context features (GRCh38)."
-    )
+    """
+    Parse command-line arguments.
+
+    Parameters
+    ----------
+    argv
+        Argument list.
+
+    Returns
+    -------
+    argparse.Namespace
+        Parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="Build per-gene genomic context features (GRCh38).")
     parser.add_argument("--gene_list_tsv", required=True, help="Input TSV with column 'gene_key'.")
-    parser.add_argument("--gencode_gtf", required=True, help="GENCODE GRCh38 gene annotation GTF (chr).")
-    parser.add_argument("--hg38_fasta", required=True, help="hg38/GRCh38 FASTA (gz OK).")
+    parser.add_argument("--gencode_gtf", required=True, help="GENCODE GRCh38 GTF (primary assembly recommended).")
+    parser.add_argument("--hg38_fasta", required=True, help="UCSC hg38 FASTA (gz ok).")
     parser.add_argument("--rmsk_tsv_gz", required=True, help="UCSC rmsk.txt.gz for hg38.")
     parser.add_argument("--segdup_tsv_gz", required=True, help="UCSC genomicSuperDups.txt.gz for hg38.")
     parser.add_argument("--recomb_bw", required=True, help="UCSC recombAvg.bw for hg38.")
-    parser.add_argument("--out_tsv", required=True, help="Output TSV path for gene context features.")
-    parser.add_argument("--mapping_report_tsv", required=True, help="Output TSV path for mapping report.")
+    parser.add_argument("--out_tsv", required=True, help="Output TSV for gene context features.")
+    parser.add_argument("--mapping_report_tsv", required=True, help="Output TSV mapping report.")
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Entry point."""
+    """
+    Run the feature-building pipeline.
+
+    Parameters
+    ----------
+    argv
+        Optional list of arguments.
+
+    Returns
+    -------
+    int
+        Exit code.
+    """
     args = parse_args(argv=argv)
     setup_logger(verbose=bool(args.verbose))
 
@@ -825,37 +1230,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     logging.info("Parsing GENCODE GTF (genes only): %s", args.gencode_gtf)
     gencode_genes = parse_gtf_genes(gencode_gtf=args.gencode_gtf)
-    gencode_genes = filter_standard_chromosomes(df=gencode_genes)
 
-    logging.info("Preparing all-genes table for density computations")
     all_genes_df = gencode_genes[["Chromosome", "Start", "End", "gene_id"]].copy()
+    logging.info("All genes for density: %s", all_genes_df.shape[0])
 
     logging.info("Mapping gene symbols to GENCODE gene_name")
-    mapped_df, report_df = map_gene_symbols_to_gencode(
-        gene_list=gene_list,
-        gencode_genes=gencode_genes,
-    )
-    logging.info(
-        "Mapped %s/%s genes (see mapping report for unmapped/ambiguous).",
-        mapped_df.shape[0],
-        gene_list.shape[0],
-    )
+    mapped_df, report_df = map_gene_symbols_to_gencode(gene_list=gene_list, gencode_genes=gencode_genes)
 
     write_tsv(df=report_df, path=args.mapping_report_tsv)
     if mapped_df.empty:
-        logging.error("No genes mapped. Cannot proceed.")
+        logging.error("No genes mapped. See mapping report: %s", args.mapping_report_tsv)
         return 2
 
-    logging.info("Loading repeats (RepeatMasker rmsk): %s", args.rmsk_tsv_gz)
+    logging.info("Loading repeats: %s", args.rmsk_tsv_gz)
     rmsk_df = parse_rmsk_table(rmsk_tsv_gz=args.rmsk_tsv_gz)
 
-    logging.info("Loading segmental duplications (genomicSuperDups): %s", args.segdup_tsv_gz)
+    logging.info("Loading segmental duplications: %s", args.segdup_tsv_gz)
     segdup_df = parse_segdup_table(segdup_tsv_gz=args.segdup_tsv_gz)
 
-    logging.info("Loading FASTA for GC and chromosome sizes: %s", args.hg38_fasta)
+    logging.info("Loading FASTA (GC + chrom sizes): %s", args.hg38_fasta)
     fasta = load_fasta(hg38_fasta=args.hg38_fasta)
 
-    logging.info("Computing feature table")
+    logging.info("Building feature table")
     features = build_feature_table(
         mapped_df=mapped_df,
         all_genes_df=all_genes_df,
