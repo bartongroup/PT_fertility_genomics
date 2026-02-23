@@ -331,16 +331,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     obs_controls = choose_controls_for_targets(
         df=features, rng=obs_rng, allow_replacement=bool(args.allow_replacement)
     )
+
+
     target_df = features[features["is_target"]].copy()
+
     control_df_obs = features.reindex(obs_controls).copy()
+    control_df_obs.index = target_df.index  # align row-wise
 
-    ctrl_df.loc[missing_mask, numeric_cols] = np.nan
-    control_df_obs.index = target_df.index  # align row-wise (may include -1 rows as NaN)
-
-    # Replace invalid selections (-1) with NaNs
+    # Sentinel (-1) indicates no available control in that stratum
     invalid_mask = obs_controls.to_numpy() == -1
     if invalid_mask.any():
         control_df_obs.loc[invalid_mask, numeric_cols] = np.nan
+        logging.warning(
+            "Observed: no matched control for %s/%s targets (empty strata).",
+            int(invalid_mask.sum()),
+            int(invalid_mask.size),
+        )
+
+    # If you ever get missing indices other than -1, warn about them too
+    non_sentinel_missing = (~obs_controls.isin(features.index)) & (obs_controls.to_numpy() != -1)
+    if bool(non_sentinel_missing.any()):
+        logging.warning(
+            "Observed: %s/%s controls were not found in the features index (non-sentinel missing).",
+            int(non_sentinel_missing.sum()),
+            int(non_sentinel_missing.size),
+        )
 
     observed_effects: Dict[str, float] = {}
     for col in numeric_cols:
@@ -348,6 +363,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             target=target_df[col].to_numpy(dtype=float),
             control=control_df_obs[col].to_numpy(dtype=float),
         )
+
 
     # Null distributions
     logging.info("Generating %s matched permutations", int(args.n_permutations))
@@ -357,9 +373,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ctrl_idx = choose_controls_for_targets(
             df=features, rng=rng, allow_replacement=bool(args.allow_replacement)
         )
-        #ctrl_df = features.loc[ctrl_idx].copy()
+
         ctrl_df = features.reindex(ctrl_idx).copy()
-        ctrl_df.index = target_df.index  # align row-wise (may include -1 rows as NaN)
+        ctrl_df.index = target_df.index
+
+        invalid = ctrl_idx.to_numpy() == -1
+        if invalid.any():
+            ctrl_df.loc[invalid, numeric_cols] = np.nan
+
+        missing_mask = ctrl_df[numeric_cols].isna().all(axis=1).to_numpy()
+        if missing_mask.any():
+            logging.debug(
+                "Permutation %s: missing controls for %s/%s targets.",
+                i + 1,
+                int(missing_mask.sum()),
+                int(missing_mask.size),
+            )
 
         invalid = ctrl_idx.to_numpy() == -1
         if invalid.any():
