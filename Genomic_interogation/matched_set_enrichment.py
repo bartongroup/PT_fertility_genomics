@@ -349,7 +349,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     # If you ever get missing indices other than -1, warn about them too
-    non_sentinel_missing = (~obs_controls.isin(features.index)) & (obs_controls.to_numpy() != -1)
+    non_sentinel_missing = (~invalid_mask) & control_df_obs[numeric_cols].isna().all(axis=1).to_numpy()
     if bool(non_sentinel_missing.any()):
         logging.warning(
             "Observed: %s/%s controls were not found in the features index (non-sentinel missing).",
@@ -389,10 +389,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 int(missing_mask.sum()),
                 int(missing_mask.size),
             )
-
-        invalid = ctrl_idx.to_numpy() == -1
-        if invalid.any():
-            ctrl_df.loc[invalid, numeric_cols] = np.nan
 
         for col in numeric_cols:
             null_effects[col][i] = median_effect(
