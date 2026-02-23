@@ -333,13 +333,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     target_df = features[features["is_target"]].copy()
     control_df_obs = features.reindex(obs_controls).copy()
-    missing_mask = ~pd.Index(ctrl_idx).isin(features.index)
-    if missing_mask.any():
-        logging.warning(
-            "Missing controls for %s/%s targets (no match in background strata).",
-            int(missing_mask.sum()),
-            int(missing_mask.size),
-        )
+
     ctrl_df.loc[missing_mask, numeric_cols] = np.nan
     control_df_obs.index = target_df.index  # align row-wise (may include -1 rows as NaN)
 
