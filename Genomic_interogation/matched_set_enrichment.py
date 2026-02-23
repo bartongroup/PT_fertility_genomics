@@ -332,7 +332,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         df=features, rng=obs_rng, allow_replacement=bool(args.allow_replacement)
     )
     target_df = features[features["is_target"]].copy()
-    control_df_obs = features.loc[obs_controls].copy()
+    control_df_obs = features.reindex(obs_controls).copy()
+    missing_mask = ~pd.Index(ctrl_idx).isin(features.index)
+    if missing_mask.any():
+        logging.warning(
+            "Missing controls for %s/%s targets (no match in background strata).",
+            int(missing_mask.sum()),
+            int(missing_mask.size),
+        )
+    ctrl_df.loc[missing_mask, numeric_cols] = np.nan
     control_df_obs.index = target_df.index  # align row-wise (may include -1 rows as NaN)
 
     # Replace invalid selections (-1) with NaNs
@@ -355,8 +363,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ctrl_idx = choose_controls_for_targets(
             df=features, rng=rng, allow_replacement=bool(args.allow_replacement)
         )
-        ctrl_df = features.loc[ctrl_idx].copy()
-        ctrl_df.index = target_df.index
+        #ctrl_df = features.loc[ctrl_idx].copy()
+        ctrl_df = features.reindex(ctrl_idx).copy()
+        ctrl_df.index = target_df.index  # align row-wise (may include -1 rows as NaN)
 
         invalid = ctrl_idx.to_numpy() == -1
         if invalid.any():
