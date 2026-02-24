@@ -1075,5 +1075,92 @@ def main() -> None:
     wb.save(args.out_xlsx)
 
 
+        # -------------------------------------------------------------------------
+    # Also write a second Excel workbook containing only gene lists per category
+    # (one column per category, column header = category name).
+    # -------------------------------------------------------------------------
+    gene_lists_out_xlsx = args.out_xlsx.with_name(
+        args.out_xlsx.stem + "_gene_lists_only.xlsx"
+    )
+
+    list_defs = [
+        ("in_hpo_gene_set", "HPO_gene_set"),
+        ("clinvar_best_present", "ClinVar_best_any"),
+        ("clinvar_best_pathogenic_present", "ClinVar_best_pathogenic"),
+        ("clinvar_hc_present", "ClinVar_high_confidence_any"),
+        ("clinvar_hc_pathogenic_present", "ClinVar_high_confidence_pathogenic"),
+        ("in_testis_high_conf_final", "Testis_high_confidence_final"),
+        ("proteomics_present_internal", "Proteomics_internal_present"),
+        ("proteomics_present_public", "Proteomics_public_present"),
+        ("proteomics_present_any_source", "Proteomics_any_source_present"),
+        ("sperm_rnaseq_present", "Sperm_RNAseq_present"),
+        ("in_literature_fertility_set", "Literature_gene_set"),
+    ]
+
+    def _sorted_gene_list(
+        df: pd.DataFrame,
+        flag_col: str,
+        gene_col: str = "gene_key",
+    ) -> List[str]:
+        """
+        Return a sorted list of gene keys where df[flag_col] is True.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Input table containing a gene identifier column and a boolean flag column.
+        flag_col : str
+            Column to use for selecting genes.
+        gene_col : str
+            Gene identifier column name.
+
+        Returns
+        -------
+        List[str]
+            Sorted unique gene identifiers for the category.
+        """
+        if flag_col not in df.columns:
+            return []
+
+        work = df[[gene_col, flag_col]].copy()
+        work[gene_col] = work[gene_col].fillna("").astype(str).str.strip()
+        work = work[work[gene_col] != ""].copy()
+
+        if work[flag_col].dtype != bool:
+            s = work[flag_col].fillna("").astype(str).str.strip().str.lower()
+            work[flag_col] = s.isin({"true", "t", "1", "yes", "y"})
+
+        genes = (
+            work.loc[work[flag_col], gene_col]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .tolist()
+        )
+        genes = sorted(set([g for g in genes if g != ""]))
+        return genes
+
+    # Build columns of uneven length (pad shorter columns with blank strings)
+    lists_dict = {}
+    max_len = 0
+    for flag_col, out_name in list_defs:
+        genes = _sorted_gene_list(df=tier_summary, flag_col=flag_col, gene_col="gene_key")
+        lists_dict[out_name] = genes
+        max_len = max(max_len, len(genes))
+
+    padded = {
+        k: v + [""] * (max_len - len(v))
+        for k, v in lists_dict.items()
+    }
+    gene_lists_df = pd.DataFrame(padded)
+
+    with pd.ExcelWriter(gene_lists_out_xlsx, engine="openpyxl") as writer:
+        gene_lists_df.to_excel(
+            writer,
+            sheet_name="Gene_Lists",
+            index=False,
+        )
+
+
 if __name__ == "__main__":
     main()

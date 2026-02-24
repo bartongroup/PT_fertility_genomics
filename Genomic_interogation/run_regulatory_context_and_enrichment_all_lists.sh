@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
+export HTTPS_PROXY="http://serverproxy1.dundee.ac.uk:3128"
+export HTTP_PROXY="http://serverproxy1.dundee.ac.uk:3128"
+export https_proxy="${HTTPS_PROXY}"
+export http_proxy="${HTTP_PROXY}"
+
+
 script_dir="/home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/Genomic_interogation"
 resources_dir="${HOME}/data/2026_sperm_Gates/genome_resources"
 gene_lists_dir="${resources_dir}/gene_lists"
@@ -15,24 +22,8 @@ if [[ ! -s "${base_features}" ]]; then
   exit 1
 fi
 
-# 1) Download a small set of tracks (edit biosamples/targets as you like)
-python "${script_dir}/download_encode_bigwig_tracks.py" \
-  --out_dir "${encode_dir}" \
-  --assembly "GRCh38" \
-  --assay_title "Repli-seq" \
-  --biosample "H1-hESC" \
-  --max_files_per_query 2 \
-  --verbose
 
-# Optional: Lamin B1 ChIP-seq signal as a LAD proxy (not true LAD calls, but informative)
-python "${script_dir}/download_encode_bigwig_tracks.py" \
-  --out_dir "${encode_dir}" \
-  --assembly "GRCh38" \
-  --assay_title "ChIP-seq" \
-  --target "Lamin B1" \
-  --biosample "H1-hESC" \
-  --max_files_per_query 2 \
-  --verbose
+
 
 manifest="${encode_dir}/encode_tracks_manifest.tsv"
 aug_features="${resources_dir}/gene_context_features_universe_plus_tracks.tsv"
