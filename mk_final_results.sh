@@ -69,3 +69,18 @@ python ~/data/2026_sperm_Gates/PT_fertility_genomics/final_summary/make_fertilit
   --uniprot_annotation_tsv /home/pthorpe001/data/2026_sperm_Gates/genome_resources/uniprot/uniprotkb_reviewed_true_2026_02_25.tsv \
   --gene_to_uniprot_tsv ~/data/2026_sperm_Gates/results/FULL_SUMMARY/gene_to_uniprot.tsv \
   --verbose
+
+
+  # final summary
+
+
+python ~/data/2026_sperm_Gates/PT_fertility_genomics/prioritise_druggable_sperm_targets.py \
+  --gene_lists_dir genome_resources/gene_lists \
+  --features_tsv genome_resources/gene_context_features_universe_plus_tracks.tsv \
+  --proteomics_tsv genome_resources/gene_lists/proteomics_internal__public__any__A_all.tsv \
+  --tractability_tsv genome_resources/gene_context_features_universe_plus_tractability.tsv \
+  --novelty_exclude_list_regex "literature" \
+  --min_lists 2 \
+  --top_n 50 \
+  --out_prefix results/sperm_target_priorities \
+  --verbose
