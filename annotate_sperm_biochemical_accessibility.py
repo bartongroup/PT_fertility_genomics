@@ -670,6 +670,15 @@ def annotate_accessibility(
 
     out[uniprot_acc_col] = out[uniprot_acc_col].fillna("").map(_normalise_uniprot_acc)
 
+    if gene_to_uniprot is not None:
+        missing_mask = out[uniprot_acc_col].astype(str).str.strip() == ""
+        n_missing = int(missing_mask.sum())
+        if n_missing > 0:
+            LOGGER.info("Filling %s missing UniProt accessions using mapping", n_missing)
+            out.loc[missing_mask, uniprot_acc_col] = (
+                out.loc[missing_mask, gene_col].map(gene_to_uniprot).fillna("")
+            )
+
     if online_uniprot_mapping:
         missing_mask = out[uniprot_acc_col].astype(str).str.strip() == ""
         n_missing = int(missing_mask.sum())
@@ -691,14 +700,6 @@ def annotate_accessibility(
             n_after = int((out[uniprot_acc_col].astype(str).str.strip() != "").sum())
             LOGGER.info("Online mapping filled %s accessions (now %s non-empty total)", n_after - n_before, n_after)
 
-    if gene_to_uniprot is not None:
-        missing_mask = out[uniprot_acc_col].astype(str).str.strip() == ""
-        n_missing = int(missing_mask.sum())
-        if n_missing > 0:
-            LOGGER.info("Filling %s missing UniProt accessions using mapping", n_missing)
-            out.loc[missing_mask, uniprot_acc_col] = (
-                out.loc[missing_mask, gene_col].map(gene_to_uniprot).fillna("")
-            )
 
     # Default empty annotation columns
     out["uniprot_subcellular_location"] = ""
