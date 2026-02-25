@@ -55,7 +55,6 @@ def setup_logger(verbose: bool) -> None:
     )
 
 
-
 def gql_request(
     query: str,
     variables: Dict[str, Any],
@@ -65,89 +64,38 @@ def gql_request(
     timeout_s: int = 30,
 ) -> Dict[str, Any]:
     """
-    Make a GraphQL request with retries.
+    Make a GraphQL request with retries (requests-based).
 
-    This version logs the response body on HTTP errors (e.g. 400), which is
-    essential for diagnosing GraphQL schema/payload issues.
-
-    Parameters
-    ----------
-    query
-        GraphQL query string.
-    variables
-        GraphQL variables dict.
-    retries
-        Number of attempts.
-    sleep_s
-        Sleep time between attempts.
-    timeout_s
-        Request timeout in seconds.
-
-    Returns
-    -------
-    dict
-        Parsed JSON response.
-
-    Raises
-    ------
-    RuntimeError
-        If request fails after retries.
+    This logs the HTTP response body on non-200 responses (e.g. 400), which is
+    essential for debugging GraphQL schema/payload issues.
     """
-    payload_bytes = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+    payload = {"query": query, "variables": variables}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "PT_fertility_genomics/annotate_opentargets_tractability.py",
+    }
 
     for attempt in range(1, retries + 1):
-        req = urllib.request.Request(
-            OT_API,
-            data=payload_bytes,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "User-Agent": "PT_fertility_genomics/annotate_opentargets_tractability.py",
-            },
-            method="POST",
-        )
-
         try:
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
+            r = requests.post(OT_API, json=payload, headers=headers, timeout=timeout_s)
 
-            out = json.loads(body)
+            if r.status_code != 200:
+                preview = (r.text or "")[:1000].replace("\n", " ").replace("\r", " ")
+                raise RuntimeError(f"HTTP {r.status_code}: {preview}")
+
+            out = r.json()
             if "errors" in out:
-                raise RuntimeError(str(out["errors"])[:1000])
+                raise RuntimeError(str(out["errors"])[:2000])
+
             return out
-
-        except HTTPError as exc:
-            err_body = ""
-            try:
-                err_body = exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                err_body = ""
-            preview = err_body[:800].replace("\n", " ").replace("\r", " ")
-            logging.warning(
-                "Open Targets request failed (%s/%s): HTTP %s %s; body=%s",
-                attempt,
-                retries,
-                exc.code,
-                exc.reason,
-                preview,
-            )
-            time.sleep(sleep_s)
-
-        except URLError as exc:
-            logging.warning(
-                "Open Targets request failed (%s/%s): URL error: %s",
-                attempt,
-                retries,
-                str(exc)[:500],
-            )
-            time.sleep(sleep_s)
 
         except Exception as exc:
             logging.warning(
                 "Open Targets request failed (%s/%s): %s",
                 attempt,
                 retries,
-                str(exc)[:500],
+                str(exc)[:2000],
             )
             time.sleep(sleep_s)
 
