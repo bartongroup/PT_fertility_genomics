@@ -202,17 +202,18 @@ def derive_proteomics_class_from_master(df: pd.DataFrame) -> pd.Series:
     """
     Derive a conservative proteomics class from master Excel columns.
 
-    Supported patterns:
-    - If 'prot_class' exists and is non-empty, use it.
-    - Else if any of these booleans exist and indicate presence:
-        proteomics_present_any_source, proteomics_present_internal, proteomics_present_public
-      then set 'Detected' when any is True.
-    - Else if numeric columns exist:
-        prot_unique_peptides_max and prot_coverage_pct_max
-      then:
-        Strong: unique_peptides >= 2 AND coverage_pct >= 10
-        Detected: unique_peptides > 0 OR coverage_pct > 0
-        None: otherwise
+    Priority:
+    1) Use existing 'prot_class' if present and non-empty.
+    2) If numeric columns exist (unique peptides and coverage), derive:
+       Strong: unique_peptides >= 2 AND coverage_pct >= 10
+       Detected: unique_peptides > 0 OR coverage_pct > 0
+       None: otherwise
+    3) Else if internal/public presence flags exist, derive:
+       Strong: internal AND public
+       Detected: internal OR public
+       None: neither
+    4) Else fall back to proteomics_present_any_source:
+       Detected if True else None.
 
     Parameters
     ----------
@@ -224,34 +225,34 @@ def derive_proteomics_class_from_master(df: pd.DataFrame) -> pd.Series:
     pd.Series
         Proteomics class per row.
     """
+    # 1) Existing class
     if "prot_class" in df.columns:
         s = df["prot_class"].astype(str).str.strip()
         if s.ne("").any():
             return s.replace("", "None").fillna("None")
 
-    # Boolean presence flags
-    present_cols = [
-        c for c in [
-            "proteomics_present_any_source",
-            "proteomics_present_internal",
-            "proteomics_present_public",
-        ]
-        if c in df.columns
-    ]
-    if present_cols:
-        present_any = np.zeros(df.shape[0], dtype=bool)
-        for c in present_cols:
-            present_any |= parse_bool_series(df[c])
-        return pd.Series(np.where(present_any, "Detected", "None"), index=df.index)
-
-    # Numeric metrics
-    if "prot_unique_peptides_max" in df.columns or "prot_coverage_pct_max" in df.columns:
+    # 2) Numeric metrics (best)
+    if ("prot_unique_peptides_max" in df.columns) or ("prot_coverage_pct_max" in df.columns):
         uniq = pd.to_numeric(df.get("prot_unique_peptides_max", 0), errors="coerce").fillna(0.0)
         cov = pd.to_numeric(df.get("prot_coverage_pct_max", 0), errors="coerce").fillna(0.0)
         strong = (uniq >= 2.0) & (cov >= 10.0)
         detected = (uniq > 0.0) | (cov > 0.0)
         out = np.where(strong, "Strong", np.where(detected, "Detected", "None"))
         return pd.Series(out, index=df.index)
+
+    # 3) Internal/public flags (useful discriminator)
+    if ("proteomics_present_internal" in df.columns) and ("proteomics_present_public" in df.columns):
+        internal = parse_bool_series(df["proteomics_present_internal"])
+        public = parse_bool_series(df["proteomics_present_public"])
+        strong = internal & public
+        detected = internal | public
+        out = np.where(strong, "Strong", np.where(detected, "Detected", "None"))
+        return pd.Series(out, index=df.index)
+
+    # 4) Fallback: any source
+    if "proteomics_present_any_source" in df.columns:
+        any_src = parse_bool_series(df["proteomics_present_any_source"])
+        return pd.Series(np.where(any_src, "Detected", "None"), index=df.index)
 
     return pd.Series(["None"] * df.shape[0], index=df.index)
 
@@ -676,6 +677,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ascending=[False, False, False, False, True],
     ).drop(columns=["prot_rank", "tract_rank"], errors="ignore")
 
+
+    prot_counts = out["prot_class"].value_counts(dropna=False).to_dict()
+    logging.info("Proteomics class counts: %s", prot_counts)
     # Candidate subset
     candidate = ranked[ranked["candidate_druggable_sperm_protein"].astype(bool)].copy()
 
