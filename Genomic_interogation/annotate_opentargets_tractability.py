@@ -111,7 +111,6 @@ query TargetTractability($ensemblId: String!) {
       modality
       value
       label
-      category
     }
   }
 }
@@ -191,7 +190,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.ensembl_column not in df.columns:
         raise SystemExit(f"Missing Ensembl column: {args.ensembl_column}")
 
-    ensembl_ids = df[args.ensembl_column].astype(str).tolist()
+    ensembl_ids = df[args.ensembl_column].astype(str).dropna().drop_duplicates().tolist()
+    logging.info("Unique Ensembl IDs to query: %s", len(ensembl_ids))
     if args.max_genes and args.max_genes > 0:
         ensembl_ids = ensembl_ids[: args.max_genes]
 
