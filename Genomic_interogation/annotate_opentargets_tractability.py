@@ -30,13 +30,14 @@ python annotate_opentargets_tractability.py \
 """
 
 from __future__ import annotations
-
+import requests
 import argparse
 import json
 import logging
 import time
 import urllib.request
 from typing import Any, Dict, List, Optional, Sequence
+from urllib.error import HTTPError, URLError
 
 import pandas as pd
 
@@ -54,25 +55,100 @@ def setup_logger(verbose: bool) -> None:
     )
 
 
-def gql_request(query: str, variables: Dict[str, Any], *, retries: int = 6, sleep_s: int = 5) -> Dict[str, Any]:
-    """Make a GraphQL request with retries."""
-    payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
-    req = urllib.request.Request(
-        OT_API,
-        data=payload,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        method="POST",
-    )
+
+def gql_request(
+    query: str,
+    variables: Dict[str, Any],
+    *,
+    retries: int = 6,
+    sleep_s: int = 5,
+    timeout_s: int = 30,
+) -> Dict[str, Any]:
+    """
+    Make a GraphQL request with retries.
+
+    This version logs the response body on HTTP errors (e.g. 400), which is
+    essential for diagnosing GraphQL schema/payload issues.
+
+    Parameters
+    ----------
+    query
+        GraphQL query string.
+    variables
+        GraphQL variables dict.
+    retries
+        Number of attempts.
+    sleep_s
+        Sleep time between attempts.
+    timeout_s
+        Request timeout in seconds.
+
+    Returns
+    -------
+    dict
+        Parsed JSON response.
+
+    Raises
+    ------
+    RuntimeError
+        If request fails after retries.
+    """
+    payload_bytes = json.dumps({"query": query, "variables": variables}).encode("utf-8")
 
     for attempt in range(1, retries + 1):
+        req = urllib.request.Request(
+            OT_API,
+            data=payload_bytes,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "PT_fertility_genomics/annotate_opentargets_tractability.py",
+            },
+            method="POST",
+        )
+
         try:
-            with urllib.request.urlopen(req) as resp:
-                out = json.loads(resp.read().decode("utf-8"))
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+
+            out = json.loads(body)
             if "errors" in out:
-                raise RuntimeError(out["errors"])
+                raise RuntimeError(str(out["errors"])[:1000])
             return out
+
+        except HTTPError as exc:
+            err_body = ""
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                err_body = ""
+            preview = err_body[:800].replace("\n", " ").replace("\r", " ")
+            logging.warning(
+                "Open Targets request failed (%s/%s): HTTP %s %s; body=%s",
+                attempt,
+                retries,
+                exc.code,
+                exc.reason,
+                preview,
+            )
+            time.sleep(sleep_s)
+
+        except URLError as exc:
+            logging.warning(
+                "Open Targets request failed (%s/%s): URL error: %s",
+                attempt,
+                retries,
+                str(exc)[:500],
+            )
+            time.sleep(sleep_s)
+
         except Exception as exc:
-            logging.warning("Open Targets request failed (%s/%s): %s", attempt, retries, exc)
+            logging.warning(
+                "Open Targets request failed (%s/%s): %s",
+                attempt,
+                retries,
+                str(exc)[:500],
+            )
             time.sleep(sleep_s)
 
     raise RuntimeError("Open Targets request failed after retries")

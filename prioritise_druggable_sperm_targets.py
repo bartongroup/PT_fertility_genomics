@@ -257,6 +257,27 @@ def derive_proteomics_class_from_master(df: pd.DataFrame) -> pd.Series:
     return pd.Series(["None"] * df.shape[0], index=df.index)
 
 
+def normalise_ensembl_gene_id(series: pd.Series, strip_version: bool) -> pd.Series:
+    """
+    Normalise Ensembl gene IDs.
+
+    Parameters
+    ----------
+    series
+        Input Ensembl gene ID series.
+    strip_version
+        If True, drop version suffix after '.'.
+
+    Returns
+    -------
+    pd.Series
+        Normalised Ensembl IDs.
+    """
+    s = series.astype(str).str.strip()
+    if strip_version:
+        s = s.str.replace(r"\.\d+$", "", regex=True)
+    return s
+
 def normalise_biochem_score(series: pd.Series) -> Tuple[pd.Series, str]:
     """
     Normalise biochemical accessibility score to 0-1 if needed.
@@ -440,6 +461,23 @@ def compute_priority_score(
     return out
 
 
+def read_tsv(path: str) -> pd.DataFrame:
+    """
+    Read a tab-separated file robustly.
+
+    Parameters
+    ----------
+    path
+        Input TSV path.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with empty strings for missing object values.
+    """
+    df = pd.read_csv(path, sep="\t", dtype=str).fillna("")
+    return df
+
 def write_outputs(
     out_prefix: str,
     ranked: pd.DataFrame,
@@ -544,6 +582,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="biochemical_accessibility_score",
         help="Biochemical accessibility score column in Gene_Master.",
     )
+    p.add_argument(
+        "--gene_id_column",
+        default="ensembl_gene_id",
+        help="Ensembl gene id column in Genes_Master (e.g. ensembl_gene_id).",
+    )
+    p.add_argument(
+        "--strip_ensembl_version",
+        action="store_true",
+        help="If set, strip version suffix from Ensembl IDs (e.g. ENSG... .2 -> ENSG...).",
+    )
+    p.add_argument("--tractability_tsv", default="", help="Optional TSV containing Open Targets tractability fields.")
+    p.add_argument("--tractability_gene_id_column", default="gene_id", help="Gene id column in tractability TSV.")
 
     # Weights
     p.add_argument("--w_per_membership", type=float, default=1.0)
@@ -578,6 +628,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.info("Reading sheets: %s and %s", args.gene_master_sheet, args.tier_sheet)
     gene_master = read_excel_sheet(args.excel_in, args.gene_master_sheet)
     tier = read_excel_sheet(args.excel_in, args.tier_sheet)
+
+    if args.gene_id_column not in gene_master.columns:
+        logging.warning(
+            "Gene id column '%s' not found in Genes_Master; tractability merge by gene_id will not be possible",
+            args.gene_id_column,
+        )
+    else:
+        gene_master["gene_id"] = normalise_ensembl_gene_id(
+            gene_master[args.gene_id_column],
+            strip_version=bool(args.strip_ensembl_version),
+        )
+        logging.info("Using gene_id column from Genes_Master: %s -> 'gene_id'", args.gene_id_column)
 
     # Normalise gene_key
     if args.gene_key_column not in gene_master.columns:
@@ -621,6 +683,54 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         on=args.gene_key_column,
         how="left",
     )
+
+    if args.tractability_tsv:
+        if "gene_id" not in merged.columns:
+            logging.warning(
+                "tractability_tsv provided but 'gene_id' is not available in merged table; "
+                "set --gene_id_column to a valid Ensembl id column (e.g. ensembl_gene_id)."
+            )
+        else:
+            logging.info("Loading tractability TSV: %s", args.tractability_tsv)
+            tract = read_tsv(args.tractability_tsv)
+
+            if args.tractability_gene_id_column not in tract.columns:
+                raise SystemExit(
+                    f"Tractability TSV missing column '{args.tractability_gene_id_column}'"
+                )
+
+            tract = tract.rename(columns={args.tractability_gene_id_column: "gene_id"})
+            tract["gene_id"] = normalise_ensembl_gene_id(
+                tract["gene_id"],
+                strip_version=bool(args.strip_ensembl_version),
+            )
+            merged["gene_id"] = normalise_ensembl_gene_id(
+                merged["gene_id"],
+                strip_version=bool(args.strip_ensembl_version),
+            )
+
+            keep = ["gene_id"]
+            for c in [
+                "ot_any_small_molecule_tractable",
+                "ot_any_antibody_tractable",
+                "ot_any_protac_tractable",
+                "ot_tractability_summary",
+                "ot_approved_symbol",
+            ]:
+                if c in tract.columns:
+                    keep.append(c)
+
+            if len(keep) == 1:
+                logging.warning(
+                    "No expected ot_* columns found in tractability TSV. Available columns: %s",
+                    ", ".join(list(tract.columns)[:50]),
+                )
+            else:
+                tract = tract[keep].drop_duplicates(subset=["gene_id"], keep="first")
+                merged = merged.merge(tract, on="gene_id", how="left")
+                logging.info("After merging tractability: %s rows, %s columns", merged.shape[0], merged.shape[1])
+    else:
+        logging.info("No tractability TSV provided; candidate_druggable_sperm_protein may be empty.")
 
     # Fill missing membership cols with False-like empties
     for c in membership_cols:
