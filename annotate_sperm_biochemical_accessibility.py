@@ -669,13 +669,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--in_tsv",
-        required=True,
+        required=False,
         type=Path,
         help="Input TSV with at least a gene identifier column (default: gene_key).",
     )
     p.add_argument(
         "--out_tsv",
-        required=True,
+        required=False,
         type=Path,
         help="Output TSV with accessibility annotations added.",
     )
