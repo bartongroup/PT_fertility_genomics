@@ -234,6 +234,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     ann = pd.DataFrame(out_rows)
     merged = df.merge(ann, on=args.ensembl_column, how="left")
+    for c in [
+        "ot_any_small_molecule_tractable",
+        "ot_any_antibody_tractable",
+        "ot_any_protac_tractable",
+    ]:
+        if c in merged.columns:
+            merged[c] = merged[c].fillna(False)
+
+    for c in ["ot_tractability_summary", "ot_approved_symbol"]:
+        if c in merged.columns:
+            merged[c] = merged[c].fillna("")
 
     merged.to_csv(args.out_tsv, sep="\t", index=False)
     logging.info("Wrote: %s", args.out_tsv)
