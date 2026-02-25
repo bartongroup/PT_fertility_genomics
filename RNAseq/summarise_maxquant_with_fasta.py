@@ -1,40 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-summarise_maxquant_proteingroups_gene_level.py
+summarise_pxd037531_maxquant_proteingroups.py
 
-Convert MaxQuant proteinGroups.txt into a gene-level proteomics evidence TSV.
+Summarise MaxQuant proteinGroups.txt into a gene-level proteomics evidence TSV,
+using a local Ensembl/UniProt FASTA to map protein identifiers to gene symbols.
 
-This script supports mapping protein identifiers to gene symbols using a local
-FASTA file (recommended for reproducibility and offline use).
+This is designed for PXD037531 (Greither et al., 2023), where MaxQuant protein
+IDs are Ensembl peptide identifiers with version suffixes (e.g. ENSP... .5).
 
-The FASTA referenced in MaxQuant parameters.txt often contains an absolute path
-from the original analysis environment (e.g. Windows drive letter). Therefore,
-this script allows passing a local FASTA path explicitly.
-
-Mapping logic
--------------
-- Extract identifiers from 'Majority protein IDs' (semicolon-separated).
-- Build a mapping dictionary from FASTA headers:
-  - UniProt style: >sp|P12345|... GN=GENE ...
-  - Ensembl pep style: >ENSP... gene:ENSG... gene_symbol:ABC1 ...
-  - Other styles: attempt Gene_Symbol=ABC1
-
-Presence logic
---------------
-Presence per sample is called using per-sample peptide count columns:
-'Peptides <sample>' > 0
-
-Filtering
----------
-Removes entries flagged as:
-- Reverse
-- Potential contaminant
-- Only identified by site
+Key features
+------------
+- Robust identifier normalisation to ensure MaxQuant IDs match FASTA IDs:
+  - strips Ensembl version suffix (e.g. .5)
+  - strips isoform suffix (e.g. -1)
+  - strips contaminants prefix (CON__)
+  - supports UniProt pipe headers (sp|P12345|...)
+- Filters MaxQuant rows flagged as Reverse / Potential contaminant /
+  Only identified by site.
+- Calls per-sample presence using per-sample peptide count columns:
+  'Peptides <sample>' > presence_threshold (default 0).
+- Produces a gene-level TSV suitable for merging into downstream summaries.
 
 Outputs
 -------
-TSV with per-gene evidence suitable for downstream merges on gene_key.
+TSV with columns:
+- gene_key
+- prot_present_any
+- prot_present_fraction
+- prot_n_samples_present
+- prot_n_samples_total
+- prot_peptide_counts_razor_unique_max
+- prot_peptide_counts_unique_max
+- prot_sequence_coverage_pct_max
+- prot_min_q_value
+- plus optional per-sample presence columns (prot_present__<sample>)
 
 All arguments are named. Output is TSV (not comma-separated).
 """
@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
         Parsed arguments.
     """
     parser = argparse.ArgumentParser(
-        description="Summarise MaxQuant proteinGroups.txt into a gene-level TSV using a local FASTA."
+        description="Summarise MaxQuant proteinGroups.txt into a gene-level TSV."
     )
     parser.add_argument(
         "--protein_groups_tsv",
@@ -71,23 +71,23 @@ def parse_args() -> argparse.Namespace:
         help="Path to MaxQuant proteinGroups.txt (tab-delimited).",
     )
     parser.add_argument(
+        "--fasta",
+        required=True,
+        type=Path,
+        help="Local FASTA used for identifier->gene mapping (Ensembl pep or UniProt FASTA).",
+    )
+    parser.add_argument(
         "--out_tsv",
         required=True,
         type=Path,
         help="Output gene-level TSV path.",
     )
     parser.add_argument(
-        "--fasta",
-        required=True,
-        type=Path,
-        help="Local FASTA used for identifier->gene mapping (UniProt or Ensembl pep FASTA).",
-    )
-    parser.add_argument(
         "--parameters_txt",
         required=False,
         type=Path,
         default=None,
-        help="Optional MaxQuant parameters.txt (for provenance/logging).",
+        help="Optional MaxQuant parameters.txt for logging provenance only.",
     )
     parser.add_argument(
         "--presence_threshold",
@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _normalise_gene(value: str) -> str:
+def _normalise_gene_symbol(value: str) -> str:
     """
     Normalise a gene symbol for joins.
 
@@ -118,24 +118,51 @@ def _normalise_gene(value: str) -> str:
     str
         Normalised gene symbol (uppercase, no whitespace).
     """
-    return re.sub(r"\s+", "", str(value).strip()).upper()
+    v = str(value).strip()
+    v = re.sub(r"\s+", "", v)
+    return v.upper()
 
 
-def _strip_isoform(identifier: str) -> str:
+def _normalise_identifier(raw_id: str) -> str:
     """
-    Strip isoform suffix for identifiers like P12345-2.
+    Normalise MaxQuant/FASTA identifiers so they match between sources.
+
+    Handles:
+    - ENSP00000... .1 / .5 versions (strip after '.')
+    - isoforms like -1 / -2 (strip after '-')
+    - contaminants 'CON__' prefix (strip it)
+    - UniProt-style pipes (sp|P12345|...) (keep accession)
 
     Parameters
     ----------
-    identifier : str
-        Identifier.
+    raw_id : str
+        Identifier token from MaxQuant or FASTA header.
 
     Returns
     -------
     str
-        Base identifier.
+        Normalised identifier.
     """
-    return str(identifier).split("-")[0].upper()
+    s = str(raw_id).strip()
+
+    if s.startswith("CON__"):
+        s = s.replace("CON__", "", 1)
+
+    # UniProt pipe format
+    if "|" in s and (s.startswith("sp|") or s.startswith("tr|")):
+        parts = s.split("|")
+        if len(parts) >= 2:
+            s = parts[1]
+
+    # Generic pipe format
+    if "|" in s:
+        s = s.split("|")[0]
+
+    # Strip isoform and version suffixes
+    s = s.split("-")[0]
+    s = s.split(".")[0]
+
+    return s.upper()
 
 
 def _safe_read_tsv(path: Path) -> pd.DataFrame:
@@ -157,18 +184,23 @@ def _safe_read_tsv(path: Path) -> pd.DataFrame:
         df = pd.read_csv(path, sep="\t", dtype=str, engine="c")
     except Exception:
         df = pd.read_csv(path, sep="\t", dtype=str, engine="python")
+
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
 
 def _parse_fasta_header(header: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Parse an identifier and gene symbol from a FASTA header.
+    Parse identifier and gene symbol from a FASTA header.
 
-    Supports:
-    - UniProt: >sp|P12345|... GN=GENE ...
-    - Ensembl pep: >ENSP0000... gene_symbol:ABC1 ...
-    - Custom: Gene_Symbol=ABC1
+    Supported examples
+    ------------------
+    - UniProt:
+      >sp|P12345|ENTRY_HUMAN ... GN=GENE ...
+    - Ensembl pep:
+      >ENSP00000444533 pep:known chromosome:GRCh38:... gene:ENSG... transcript:ENST... gene_symbol:ABC1 ...
+    - Custom:
+      >A2A4G1 ... Gene_Symbol=Krt15 ...
 
     Parameters
     ----------
@@ -178,25 +210,25 @@ def _parse_fasta_header(header: str) -> Tuple[Optional[str], Optional[str]]:
     Returns
     -------
     Tuple[Optional[str], Optional[str]]
-        (identifier, gene_symbol) or (None, None) if not parsable.
+        (normalised_identifier, normalised_gene_symbol) or (None, None).
     """
     h = header.strip()
     if not h.startswith(">"):
         return (None, None)
 
-    ident = None
-    gene = None
+    ident: Optional[str] = None
+    gene: Optional[str] = None
 
-    # UniProt ID
+    # Prefer UniProt ID if present
     m = re.search(r"\b(?:sp|tr)\|([A-Z0-9]+(?:-[0-9]+)?)\|", h)
     if m:
-        ident = m.group(1).upper()
+        ident = m.group(1)
 
-    # Ensembl peptide ID
+    # Otherwise, take the first token after '>'
     if ident is None:
-        m = re.match(r"^>(ENSP[0-9A-Za-z]+)", h)
+        m = re.match(r"^>(\S+)", h)
         if m:
-            ident = m.group(1).upper()
+            ident = m.group(1)
 
     # Gene symbol patterns
     m = re.search(r"\bGN=([A-Za-z0-9\-]+)\b", h)
@@ -214,7 +246,7 @@ def _parse_fasta_header(header: str) -> Tuple[Optional[str], Optional[str]]:
     if ident is None or gene is None:
         return (None, None)
 
-    return (_strip_isoform(ident), _normalise_gene(gene))
+    return (_normalise_identifier(ident), _normalise_gene_symbol(gene))
 
 
 def build_id_to_gene_map(fasta_path: Path) -> Dict[str, str]:
@@ -229,7 +261,7 @@ def build_id_to_gene_map(fasta_path: Path) -> Dict[str, str]:
     Returns
     -------
     Dict[str, str]
-        Mapping of identifier (base) to gene_key.
+        Mapping of normalised identifier to gene_key.
     """
     mapping: Dict[str, str] = {}
     with fasta_path.open("r", errors="replace") as handle:
@@ -245,28 +277,26 @@ def build_id_to_gene_map(fasta_path: Path) -> Dict[str, str]:
 
 def _extract_ids(value: str) -> List[str]:
     """
-    Extract identifiers from MaxQuant protein ID fields.
+    Extract normalised identifiers from MaxQuant 'Majority protein IDs'.
 
     Parameters
     ----------
     value : str
-        Field containing IDs (semicolon-separated).
+        Field containing semicolon-separated IDs.
 
     Returns
     -------
     List[str]
-        List of base identifiers.
+        List of normalised identifiers.
     """
     if value is None:
         return []
-    ids = []
+    ids: List[str] = []
     for token in str(value).split(";"):
         t = token.strip()
         if t == "":
             continue
-        if t.startswith("CON__"):
-            continue
-        ids.append(_strip_isoform(t))
+        ids.append(_normalise_identifier(t))
     return ids
 
 
@@ -277,9 +307,9 @@ def main() -> None:
     args = parse_args()
 
     if args.parameters_txt is not None and args.parameters_txt.exists():
-        # purely informational (do not fail if path is foreign)
-        for line in args.parameters_txt.read_text(errors="replace").splitlines():
-            if "fasta" in line.lower() and "\t" in line:
+        txt = args.parameters_txt.read_text(errors="replace").splitlines()
+        for line in txt:
+            if "fasta" in line.lower():
                 print("MaxQuant parameters FASTA entry:", line.strip())
                 break
 
@@ -298,7 +328,7 @@ def main() -> None:
     if "Majority protein IDs" not in df.columns:
         raise ValueError("Expected column 'Majority protein IDs' not found.")
 
-    # Map each protein group to a gene_key using the first ID that maps
+    # Map each protein group to a gene key using the first identifier that maps
     gene_keys: List[Optional[str]] = []
     for v in df["Majority protein IDs"].fillna("").astype(str).tolist():
         g = None
@@ -324,7 +354,9 @@ def main() -> None:
     df["_present_fraction"] = df["_n_samples_present"] / df["_n_samples_total"]
 
     df["_pep_unique"] = pd.to_numeric(df.get("Peptide counts (unique)", np.nan), errors="coerce")
-    df["_pep_razor_unique"] = pd.to_numeric(df.get("Peptide counts (razor+unique)", np.nan), errors="coerce")
+    df["_pep_razor_unique"] = pd.to_numeric(
+        df.get("Peptide counts (razor+unique)", np.nan), errors="coerce"
+    )
     df["_coverage_pct"] = pd.to_numeric(df.get("Sequence coverage [%]", np.nan), errors="coerce")
     df["_q_value"] = pd.to_numeric(df.get("Q-value", np.nan), errors="coerce")
 
@@ -335,8 +367,8 @@ def main() -> None:
             prot_present_fraction=("_present_fraction", "max"),
             prot_n_samples_present=("_n_samples_present", "max"),
             prot_n_samples_total=("_n_samples_total", "max"),
-            prot_peptide_counts_unique_max=("_pep_unique", "max"),
             prot_peptide_counts_razor_unique_max=("_pep_razor_unique", "max"),
+            prot_peptide_counts_unique_max=("_pep_unique", "max"),
             prot_sequence_coverage_pct_max=("_coverage_pct", "max"),
             prot_min_q_value=("_q_value", "min"),
         )
@@ -350,8 +382,13 @@ def main() -> None:
 
     if args.write_per_sample_columns:
         present_bool = present.copy()
-        present_bool.columns = [f"prot_present__{c.replace('Peptides ', '').strip()}" for c in present_bool.columns]
-        tmp = pd.concat([df[["gene_key"]].reset_index(drop=True), present_bool.reset_index(drop=True)], axis=1)
+        present_bool.columns = [
+            f"prot_present__{c.replace('Peptides ', '').strip()}" for c in present_bool.columns
+        ]
+        tmp = pd.concat(
+            [df[["gene_key"]].reset_index(drop=True), present_bool.reset_index(drop=True)],
+            axis=1,
+        )
         per_sample = tmp.groupby("gene_key", as_index=False).max()
         gene = gene.merge(per_sample, on="gene_key", how="left")
 

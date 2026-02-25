@@ -253,9 +253,10 @@ python "${SCRIPTS_DIR}"/summarise_pxd014618_toppic_output_table.py \
   python  "${SCRIPTS_DIR}"/summarise_maxquant_with_fasta.py \
   --protein_groups_tsv proteinGroups.txt \
   --parameters_txt parameters.txt \
-  --out_tsv PXD037531_gene_level_proteomics.tsv
+  --out_tsv PXD037531_gene_level_proteomics.tsv \
+  --fasta Homo_sapiens.GRCh38.pep.all.fa
 
-  
+
 
 ###############################################################################
 # 9) Final high-confidence extraction (after HPO + proteomics)
