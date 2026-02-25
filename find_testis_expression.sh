@@ -247,10 +247,13 @@ python "${SCRIPTS_DIR}"/summarise_pxd014618_toppic_output_table.py \
   --write_per_replicate_columns
 
 # use this one insted
-python "${SCRIPTS_DIR}"/summarise_pxd037531_maxquant_proteingroups.py \
+
+
+
+  python  "${SCRIPTS_DIR}"/summarise_maxquant_with_fasta.py \
   --protein_groups_tsv proteinGroups.txt \
-  --out_tsv PXD037531_gene_level_proteomics.tsv \
-  --write_per_sample_columns
+  --parameters_txt parameters.txt \
+  --out_tsv PXD037531_gene_level_proteomics.tsv
 
 ###############################################################################
 # 9) Final high-confidence extraction (after HPO + proteomics)

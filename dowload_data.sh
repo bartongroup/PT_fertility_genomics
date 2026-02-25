@@ -66,6 +66,10 @@ wget https://ftp.pride.ebi.ac.uk/pride/data/archive/2019/11/PXD014618/3506_AS_77
 
 cd ../
 
+# BETTER PROTEOMICS DATASET
+
+curl -O ftp://ftp.pride.ebi.ac.uk/pride/data/archive/2023/04/PXD037531/MQtxt.zip
+
 ###############################################################################
 # Sperm RNA-seq (GSE40181)
 ###############################################################################
@@ -157,13 +161,3 @@ echo "All downloads complete."
 
 
 
-
-mkdir -p ~/data/2026_sperm_Gates/genome_resources/encode_tracks
-
-# https://www.encodeproject.org/files/ENCFF764VEA/
-wget https://www.encodeproject.org/files/ENCFF764VEA/@@download/ENCFF764VEA.bigWig
-
-
-# MANUALLY DOWNLOAD FROM encode
-
-# biosample:  H1-hESC
