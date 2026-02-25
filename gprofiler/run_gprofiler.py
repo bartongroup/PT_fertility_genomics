@@ -1,4 +1,29 @@
-oxy).
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+run_gprofiler_from_excel.py
+
+Run g:Profiler enrichment (via gprofiler2 in R) for multiple gene sets stored as
+columns in a single Excel workbook.
+
+Input format
+------------
+An Excel file (.xlsx) where each column is a gene set and each row is a gene
+symbol (e.g., ABCD1). Empty cells are allowed.
+
+Outputs (TSV + PDF)
+-------------------
+For each gene set (column):
+- <set_name>_gprofiler_results.tsv
+- <set_name>_gprofiler_plot.pdf   (if results exist)
+
+Additionally:
+- all_sets_gprofiler_results.tsv  (combined results table)
+
+Background choice
+-----------------
+By default, the script uses the union of all genes across all columns in the
+Excel file as the custom background (a reasonable "study universe" proxy).
 
 You may also supply an explicit background TSV/TXT file (one gene per line),
 or disable custom background to use g:Profiler defaults.
@@ -31,32 +56,7 @@ def setup_logging(*, out_dir: Path) -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[
-            logging.FileH#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-run_gprofiler_from_excel.py
-
-Run g:Profiler enrichment (via gprofiler2 in R) for multiple gene sets stored as
-columns in a single Excel workbook.
-
-Input format
-------------
-An Excel file (.xlsx) where each column is a gene set and each row is a gene
-symbol (e.g., ABCD1). Empty cells are allowed.
-
-Outputs (TSV + PDF)
--------------------
-For each gene set (column):
-- <set_name>_gprofiler_results.tsv
-- <set_name>_gprofiler_plot.pdf   (if results exist)
-
-Additionally:
-- all_sets_gprofiler_results.tsv  (combined results table)
-
-Background choice
------------------
-By default, the script uses the union of all genes across all columns in the
-Excel file as the custom background (a reasonable "study universe" prandler(filename=str(log_path), mode="w", encoding="utf-8"),
+            logging.FileHandler(filename=str(log_path), mode="w", encoding="utf-8"),
             logging.StreamHandler(),
         ],
     )
@@ -247,7 +247,7 @@ for (col_i in seq_len(ncol(input_df))) {
 
   out_tsv <- file.path(out_dir, paste0(set_name, "_gprofiler_results.tsv"))
   out_pdf <- file.path(out_dir, paste0(set_name, "_gprofiler_plot.pdf"))
-
+  out_xlsx <- file.path(out_dir, paste0(set_name, "_gprofiler_results.xlsx"))
   if (is.null(res) || is.null(res$result) || nrow(res$result) == 0) {
     message(sprintf("No enrichment results for %s. Writing empty TSV.", set_name_raw))
     write.table(
@@ -257,20 +257,45 @@ for (col_i in seq_len(ncol(input_df))) {
       quote = FALSE,
       row.names = FALSE
     )
+    write.xlsx(
+      data.frame(),
+      file = out_xlsx,
+      sheetName = set_name_raw,
+      overwrite = TRUE
+    )
     next
   }
 
-  res_tbl <- res$result
-  res_tbl$gene_set <- set_name_raw
+flatten_list_columns <- function(df) {
+  for (nm in names(df)) {
+    if (is.list(df[[nm]])) {
+      df[[nm]] <- vapply(
+        df[[nm]],
+        function(x) {
+          if (is.null(x) || length(x) == 0) {
+            return("")
+          }
+          paste(as.character(x), collapse = ";")
+        },
+        FUN.VALUE = character(1)
+      )
+    }
+  }
+  return(df)
+}
 
-  write.table(
-    res_tbl,
-    file = out_tsv,
-    sep = "\t",
-    quote = FALSE,
-    row.names = FALSE
-  )
+res_tbl <- res$result
+res_tbl$gene_set <- set_name_raw
 
+res_tbl <- flatten_list_columns(res_tbl)
+
+write.table(
+  res_tbl,
+  file = out_tsv,
+  sep = "\t",
+  quote = FALSE,
+  row.names = FALSE
+)
   combined_results <- rbind(combined_results, res_tbl)
 
   p <- tryCatch(
@@ -287,6 +312,8 @@ for (col_i in seq_len(ncol(input_df))) {
 }
 
 combined_out <- file.path(out_dir, "all_sets_gprofiler_results.tsv")
+combined_xlsx <- file.path(out_dir, "all_sets_gprofiler_results.xlsx")
+
 write.table(
   combined_results,
   file = combined_out,
@@ -294,6 +321,12 @@ write.table(
   quote = FALSE,
   row.names = FALSE
 )
+
+wb_all <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb_all, "combined_results")
+openxlsx::writeData(wb_all, "combined_results", combined_results)
+openxlsx::saveWorkbook(wb_all, combined_xlsx, overwrite = TRUE)
+
 
 message("Done.")
 """

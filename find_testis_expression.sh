@@ -234,6 +234,7 @@ python "${SCRIPTS_DIR}/add_proteomics_annotation.py" \
 # 8b) Add proteomics annotation
 ###############################################################################
 
+# THIS DATASET ONLY HAS 2 Gnes, so dont bother. 
 
 python "${SCRIPTS_DIR}"/summarise_pxd014618_toppic_output_table.py \
   --input_tables \
@@ -245,6 +246,11 @@ python "${SCRIPTS_DIR}"/summarise_pxd014618_toppic_output_table.py \
   --require_both_thresholds \
   --write_per_replicate_columns
 
+# use this one insted
+python "${SCRIPTS_DIR}"/summarise_pxd037531_maxquant_proteingroups.py \
+  --protein_groups_tsv proteinGroups.txt \
+  --out_tsv PXD037531_gene_level_proteomics.tsv \
+  --write_per_sample_columns
 
 ###############################################################################
 # 9) Final high-confidence extraction (after HPO + proteomics)
