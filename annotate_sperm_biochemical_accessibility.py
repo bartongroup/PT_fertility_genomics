@@ -220,11 +220,15 @@ def _normalise_uniprot_acc(value: object) -> str:
     Returns
     -------
     str
-        Trimmed accession string.
+        Trimmed accession string with isoform suffix removed.
     """
     if value is None:
         return ""
-    return str(value).strip()
+    s = str(value).strip()
+    # Drop isoform suffix if present (e.g. P12345-2 -> P12345)
+    s = s.split("-")[0]
+    return s
+
 
 
 def _as_bool_from_feature_text(value: object) -> bool:
@@ -570,21 +574,32 @@ def annotate_accessibility(
 
     if uniprot_records is not None:
         LOGGER.info("Annotating UniProt fields from offline UniProt table")
+
+
         recs = out[uniprot_acc_col].map(uniprot_records)
+
         out["uniprot_subcellular_location"] = recs.map(
-            lambda r: r.subcellular_location if r is not None else ""
+            lambda r: r.subcellular_location if isinstance(r, UniprotRecord) else ""
         )
-        out["uniprot_keywords"] = recs.map(lambda r: r.keywords if r is not None else "")
-        out["uniprot_go_cc"] = recs.map(lambda r: r.go_cc if r is not None else "")
+        out["uniprot_keywords"] = recs.map(
+            lambda r: r.keywords if isinstance(r, UniprotRecord) else ""
+        )
+        out["uniprot_go_cc"] = recs.map(
+            lambda r: r.go_cc if isinstance(r, UniprotRecord) else ""
+        )
         out["uniprot_signal_peptide_raw"] = recs.map(
-            lambda r: r.signal_peptide if r is not None else ""
+            lambda r: r.signal_peptide if isinstance(r, UniprotRecord) else ""
         )
         out["uniprot_transmembrane_raw"] = recs.map(
-            lambda r: r.transmembrane if r is not None else ""
+            lambda r: r.transmembrane if isinstance(r, UniprotRecord) else ""
         )
         out["uniprot_protein_name"] = recs.map(
-            lambda r: r.protein_name if r is not None else ""
+            lambda r: r.protein_name if isinstance(r, UniprotRecord) else ""
         )
+    n_found = int(recs.map(lambda r: isinstance(r, UniprotRecord)).sum())
+    n_total = int(recs.shape[0])
+    LOGGER.info("UniProt record hits: %s / %s", n_found, n_total)
+
 
     # Feature flags
     out["has_signal_peptide"] = out["uniprot_signal_peptide_raw"].map(_as_bool_from_feature_text)
