@@ -21,62 +21,29 @@ Identify novel, potentially druggable sperm protein targets by:
 3) prioritising genes with multiple independent lines of sperm relevance
 4) optionally downweighting genes already present in a "literature" list (novelty)
 
-Inputs
-------
---gene_lists_dir
-    Folder containing one or more TSV gene lists. Each TSV must contain a column
-    named by --gene_key_column (default: gene_key).
-
---features_tsv (optional but recommended)
-    Per-gene feature table containing at least gene_key and (optionally) gene_id.
-    If supplied, it allows you to carry genomic/regulatory context columns through
-    to the final output (useful for interpretation and later filtering).
-
---proteomics_tsv (optional)
-    TSV containing proteomic evidence. You can supply:
-      - a categorical column (e.g. prot_class: None/Detected/Strong)
-    or
-      - numeric columns (e.g. prot_unique_peptides_max, prot_coverage_pct_max)
-    The script can derive a class if numeric metrics are present.
-
---tractability_tsv (optional)
-    Output from annotate_opentargets_tractability.py. Must include gene_id (Ensembl)
-    and the tractability boolean fields:
-      ot_any_small_molecule_tractable
-      ot_any_antibody_tractable
-      ot_any_protac_tractable
-
 Outputs
 -------
-A ranked TSV with:
-- gene_key, gene_id (when available)
-- list membership summary across gene list files
-- proteomics summary (if provided)
-- tractability summary (if provided)
-- an overall priority_score and score_components
+Writes:
+1) Main ranked table:
+   - <out_prefix>.tsv
+   - <out_prefix>.xlsx
 
-Examples
---------
-1) Minimal (list membership only)
-python prioritise_druggable_sperm_targets.py \
-  --gene_lists_dir ~/data/2026_sperm_Gates/genome_resources/gene_lists \
-  --out_tsv sperm_target_priorities.tsv
+2) Convenience subsets:
+   - <out_prefix>__candidate_druggable_sperm_protein.tsv
+   - <out_prefix>__candidate_druggable_sperm_protein.xlsx
+   - (optional) <out_prefix>__topN.tsv and .xlsx if --top_n > 0
 
-2) Recommended (carry features + add proteomics + tractability)
-python prioritise_druggable_sperm_targets.py \
-  --gene_lists_dir ~/data/2026_sperm_Gates/genome_resources/gene_lists \
-  --features_tsv ~/data/2026_sperm_Gates/genome_resources/gene_context_features_universe_plus_tracks.tsv \
-  --proteomics_tsv ~/data/2026_sperm_Gates/genome_resources/gene_lists/proteomics_internal__public__any__A_all.tsv \
-  --tractability_tsv ~/data/2026_sperm_Gates/genome_resources/gene_context_features_universe_plus_tractability.tsv \
-  --novelty_exclude_list_regex "literature" \
-  --out_tsv sperm_target_priorities.tsv \
-  --verbose
+Excel workbook structure
+------------------------
+Each .xlsx contains multiple sheets (where applicable):
+- ranked (always)
+- candidate_druggable_sperm_protein (always; may be empty)
+- topN (only if --top_n > 0; may be smaller than N after filtering)
 
 Notes
 -----
-- All outputs are TSV.
-- This script does not attempt to "prove" druggability; it ranks candidates for
-  follow-up, consistent with target discovery workflows.
+- All outputs are TSV and XLSX (tab-separated for TSV; Excel is workbook format).
+- This script ranks candidates; it does not "prove" druggability.
 """
 
 from __future__ import annotations
@@ -86,6 +53,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -123,7 +91,7 @@ def setup_logger(verbose: bool) -> None:
 
 def read_tsv(path: str) -> pd.DataFrame:
     """
-    Read TSV with robust defaults.
+    Read a TSV with robust defaults.
 
     Parameters
     ----------
@@ -135,7 +103,9 @@ def read_tsv(path: str) -> pd.DataFrame:
     pd.DataFrame
         DataFrame (strings preserved where possible).
     """
-    return pd.read_csv(path, sep="\t", dtype=str).fillna("")
+    df = pd.read_csv(path, sep="\t", dtype=str)
+    df = df.fillna("")
+    return df
 
 
 def normalise_gene_key(series: pd.Series) -> pd.Series:
@@ -169,7 +139,7 @@ def list_tsv_files(gene_lists_dir: str) -> List[str]:
     list of str
         TSV file paths.
     """
-    files = []
+    files: List[str] = []
     for name in sorted(os.listdir(gene_lists_dir)):
         if name.startswith("."):
             continue
@@ -195,7 +165,7 @@ def load_gene_lists(
     Returns
     -------
     membership_df
-        DataFrame with columns: gene_key, and one boolean column per list.
+        DataFrame with columns: gene_key, boolean columns per list, n_lists, list_names.
     list_to_genes
         Mapping from list stem name to set of gene_key values.
     """
@@ -206,9 +176,12 @@ def load_gene_lists(
     list_to_genes: Dict[str, Set[str]] = {}
     all_genes: Set[str] = set()
 
+    logging.info("Discovered %s TSV files in gene_lists_dir", len(paths))
+
     for path in paths:
         stem = os.path.splitext(os.path.basename(path))[0]
         df = read_tsv(path)
+
         if gene_key_column not in df.columns:
             logging.warning("Skipping %s (missing column '%s')", path, gene_key_column)
             continue
@@ -220,7 +193,7 @@ def load_gene_lists(
         list_to_genes[stem] = gene_set
         all_genes.update(gene_set)
 
-        logging.info("Loaded list %s: %s genes", stem, len(gene_set))
+        logging.info("Loaded list '%s': %s genes (%s)", stem, len(gene_set), path)
 
     if not list_to_genes:
         raise ValueError(
@@ -233,10 +206,21 @@ def load_gene_lists(
     for stem, gene_set in list_to_genes.items():
         membership[stem] = membership["gene_key"].isin(gene_set)
 
-    membership["n_lists"] = membership[[c for c in membership.columns if c not in {"gene_key", "n_lists"}]].sum(axis=1)
-    membership["list_names"] = membership.apply(
-        lambda r: "|".join([c for c in membership.columns if c not in {"gene_key", "n_lists", "list_names"} and bool(r[c])]),
-        axis=1,
+    list_cols = [c for c in membership.columns if c != "gene_key"]
+    membership["n_lists"] = membership[list_cols].sum(axis=1).astype(int)
+
+    # Vectorised list_names (no row-wise apply)
+    col_arr = np.array(list_cols, dtype=object)
+    mask = membership[list_cols].to_numpy(dtype=bool)
+    membership["list_names"] = [
+        "|".join(col_arr[row_mask].tolist()) if row_mask.any() else ""
+        for row_mask in mask
+    ]
+
+    logging.info(
+        "Membership matrix: %s genes, %s list columns",
+        membership.shape[0],
+        len(list_cols),
     )
 
     return membership, list_to_genes
@@ -263,8 +247,11 @@ def derive_proteomics_class(df: pd.DataFrame) -> pd.DataFrame:
     """
     out = df.copy()
 
-    if "prot_class" in out.columns and out["prot_class"].astype(str).str.strip().ne("").any():
-        return out
+    if "prot_class" in out.columns:
+        non_empty = out["prot_class"].astype(str).str.strip().ne("")
+        if non_empty.any():
+            logging.info("Proteomics: using existing 'prot_class' column")
+            return out
 
     def to_float(s: pd.Series) -> pd.Series:
         return pd.to_numeric(s, errors="coerce")
@@ -274,9 +261,10 @@ def derive_proteomics_class(df: pd.DataFrame) -> pd.DataFrame:
     cov = to_float(out["prot_coverage_pct_max"]) if "prot_coverage_pct_max" in out.columns else None
 
     if present_any is None and uniq is None and cov is None:
+        logging.info("Proteomics: no prot_class or numeric evidence columns found; leaving as-is")
         return out
 
-    prot_class = []
+    prot_class: List[str] = []
     for i in range(out.shape[0]):
         pa = float(present_any.iloc[i]) if present_any is not None and not np.isnan(present_any.iloc[i]) else 0.0
         up = float(uniq.iloc[i]) if uniq is not None and not np.isnan(uniq.iloc[i]) else 0.0
@@ -290,7 +278,26 @@ def derive_proteomics_class(df: pd.DataFrame) -> pd.DataFrame:
             prot_class.append("None")
 
     out["prot_class"] = prot_class
+    logging.info("Proteomics: derived 'prot_class' for %s rows", out.shape[0])
     return out
+
+
+def parse_bool_series(series: pd.Series) -> np.ndarray:
+    """
+    Parse a pandas Series into a boolean numpy array from common truthy tokens.
+
+    Parameters
+    ----------
+    series
+        Series to parse.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean array.
+    """
+    vals = series.astype(str).str.strip().str.lower()
+    return vals.isin({"true", "1", "t", "yes", "y"}).to_numpy()
 
 
 def compute_priority_score(
@@ -332,7 +339,7 @@ def compute_priority_score(
 
     # Proteomics
     if "prot_class" in out.columns:
-        prot = out["prot_class"].astype(str).str.strip().str.title()
+        prot = out["prot_class"].fillna("None").astype(str).str.strip().str.title()
         for i, pc in enumerate(prot.tolist()):
             if pc == "Strong":
                 scores[i] += float(weights.proteomics_strong)
@@ -342,42 +349,42 @@ def compute_priority_score(
                 components[i].append(f"prot:Detected+{weights.proteomics_detected:g}")
 
     # Tractability
-    def bool_col(name: str) -> Optional[pd.Series]:
+    def bool_col(name: str) -> Optional[np.ndarray]:
         if name not in out.columns:
             return None
-        vals = out[name].astype(str).str.strip().str.lower()
-        return vals.isin({"true", "1", "t", "yes", "y"})
+        return parse_bool_series(out[name])
 
     sm = bool_col("ot_any_small_molecule_tractable")
     ab = bool_col("ot_any_antibody_tractable")
     pr = bool_col("ot_any_protac_tractable")
 
     if sm is not None:
-        idx = np.where(sm.to_numpy())[0]
+        idx = np.where(sm)[0]
         scores[idx] += float(weights.tract_small_molecule)
         for i in idx.tolist():
             components[i].append(f"tract:SM+{weights.tract_small_molecule:g}")
 
     if ab is not None:
-        idx = np.where(ab.to_numpy())[0]
+        idx = np.where(ab)[0]
         scores[idx] += float(weights.tract_antibody)
         for i in idx.tolist():
             components[i].append(f"tract:Ab+{weights.tract_antibody:g}")
 
     if pr is not None:
-        idx = np.where(pr.to_numpy())[0]
+        idx = np.where(pr)[0]
         scores[idx] += float(weights.tract_protac)
         for i in idx.tolist():
             components[i].append(f"tract:PROTAC+{weights.tract_protac:g}")
 
     # Novelty bonus: only if gene is not present in excluded lists
     novelty_mask = np.ones(out.shape[0], dtype=bool)
-    for col in novelty_excluded_lists:
-        if col in out.columns:
-            vals = out[col].astype(bool).to_numpy()
-            novelty_mask &= ~vals
-
     if novelty_excluded_lists:
+        for col in novelty_excluded_lists:
+            if col in out.columns:
+                # membership columns should be bool, but parse robustly anyway
+                novelty_mask &= ~parse_bool_series(out[col])
+        novelty_mask &= (n_lists > 0)
+
         scores[novelty_mask] += float(weights.novelty_bonus)
         for i in np.where(novelty_mask)[0].tolist():
             components[i].append(f"novelty+{weights.novelty_bonus:g}")
@@ -385,23 +392,129 @@ def compute_priority_score(
     out["priority_score"] = scores
     out["score_components"] = [";".join(c) for c in components]
 
-    # A convenience boolean for "has any tractability signal"
+    # Convenience booleans
     tract_any = np.zeros(out.shape[0], dtype=bool)
-    for series in [sm, ab, pr]:
-        if series is not None:
-            tract_any |= series.to_numpy()
+    for arr in [sm, ab, pr]:
+        if arr is not None:
+            tract_any |= arr
     out["ot_any_tractable"] = tract_any
 
-    # A convenience boolean for "protein present at least detected"
     if "prot_class" in out.columns:
-        out["prot_any_detected_or_strong"] = out["prot_class"].astype(str).str.strip().str.title().isin({"Detected", "Strong"})
+        out["prot_any_detected_or_strong"] = (
+            out["prot_class"]
+            .fillna("None")
+            .astype(str)
+            .str.strip()
+            .str.title()
+            .isin({"Detected", "Strong"})
+        )
     else:
         out["prot_any_detected_or_strong"] = False
 
-    # Optional: "druggable protein in sperm" heuristic
-    out["candidate_druggable_sperm_protein"] = out["ot_any_tractable"].astype(bool) & out["prot_any_detected_or_strong"].astype(bool)
+    out["candidate_druggable_sperm_protein"] = (
+        out["ot_any_tractable"].astype(bool)
+        & out["prot_any_detected_or_strong"].astype(bool)
+    )
 
     return out
+
+
+def ensure_out_prefix(path: str) -> str:
+    """
+    Convert an output path (possibly ending in .tsv/.xlsx) into a prefix.
+
+    Parameters
+    ----------
+    path
+        Output path or prefix.
+
+    Returns
+    -------
+    str
+        Prefix without extension.
+    """
+    if path.lower().endswith(".tsv"):
+        return path[:-4]
+    if path.lower().endswith(".xlsx"):
+        return path[:-5]
+    return path
+
+
+def write_outputs(
+    out_prefix: str,
+    ranked: pd.DataFrame,
+    candidate: pd.DataFrame,
+    topn: Optional[pd.DataFrame],
+) -> None:
+    """
+    Write TSV and Excel outputs.
+
+    Parameters
+    ----------
+    out_prefix
+        Output prefix (no extension).
+    ranked
+        Ranked full table.
+    candidate
+        Subset where candidate_druggable_sperm_protein is True.
+    topn
+        Optional top-N subset.
+    """
+    out_dir = os.path.dirname(os.path.abspath(out_prefix)) or "."
+    os.makedirs(out_dir, exist_ok=True)
+
+    ranked_tsv = f"{out_prefix}.tsv"
+    ranked_xlsx = f"{out_prefix}.xlsx"
+
+    ranked.to_csv(ranked_tsv, sep="\t", index=False)
+    logging.info("Wrote ranked TSV: %s rows -> %s", ranked.shape[0], ranked_tsv)
+
+    # Subset outputs
+    cand_prefix = f"{out_prefix}__candidate_druggable_sperm_protein"
+    cand_tsv = f"{cand_prefix}.tsv"
+    cand_xlsx = f"{cand_prefix}.xlsx"
+
+    candidate.to_csv(cand_tsv, sep="\t", index=False)
+    logging.info("Wrote candidate TSV: %s rows -> %s", candidate.shape[0], cand_tsv)
+
+    if topn is not None:
+        top_prefix = f"{out_prefix}__top{topn.shape[0]}"
+        top_tsv = f"{top_prefix}.tsv"
+        top_xlsx = f"{top_prefix}.xlsx"
+        topn.to_csv(top_tsv, sep="\t", index=False)
+        logging.info("Wrote top-N TSV: %s rows -> %s", topn.shape[0], top_tsv)
+
+    # Excel workbooks
+    def write_excel(path: str, sheets: Dict[str, pd.DataFrame]) -> None:
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            for sheet_name, df in sheets.items():
+                safe_name = sheet_name[:31]
+                df.to_excel(writer, sheet_name=safe_name, index=False)
+
+    write_excel(
+        ranked_xlsx,
+        sheets={
+            "ranked": ranked,
+            "candidate_druggable_sperm_protein": candidate,
+            **({"topN": topn} if topn is not None else {}),
+        },
+    )
+    logging.info("Wrote ranked Excel workbook -> %s", ranked_xlsx)
+
+    write_excel(
+        cand_xlsx,
+        sheets={"candidate_druggable_sperm_protein": candidate},
+    )
+    logging.info("Wrote candidate Excel workbook -> %s", cand_xlsx)
+
+    if topn is not None:
+        top_prefix = f"{out_prefix}__top{topn.shape[0]}"
+        top_xlsx = f"{top_prefix}.xlsx"
+        write_excel(
+            top_xlsx,
+            sheets={"topN": topn},
+        )
+        logging.info("Wrote top-N Excel workbook -> %s", top_xlsx)
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -416,6 +529,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Prioritise candidate druggable sperm targets.")
     p.add_argument("--gene_lists_dir", required=True, help="Directory of TSV gene lists.")
     p.add_argument("--gene_key_column", default="gene_key", help="Gene symbol column name in gene lists.")
+
     p.add_argument("--features_tsv", default="", help="Optional feature table TSV to carry through.")
     p.add_argument("--proteomics_tsv", default="", help="Optional proteomics TSV.")
     p.add_argument("--proteomics_gene_key_column", default="gene_key", help="Gene symbol column in proteomics TSV.")
@@ -438,7 +552,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--w_novelty", type=float, default=1.5)
 
     p.add_argument("--min_lists", type=int, default=1, help="Filter: minimum number of lists a gene must appear in.")
-    p.add_argument("--out_tsv", required=True, help="Output TSV path.")
+    p.add_argument("--top_n", type=int, default=0, help="Optional: also write top N rows as separate outputs.")
+    p.add_argument(
+        "--out_prefix",
+        required=True,
+        help="Output prefix (or path ending .tsv/.xlsx). Writes both TSV and XLSX.",
+    )
     p.add_argument("--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -448,18 +567,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     setup_logger(verbose=args.verbose)
 
+    start = datetime.now()
+
     if not os.path.isdir(args.gene_lists_dir):
         raise SystemExit(f"gene_lists_dir not found: {args.gene_lists_dir}")
+
+    out_prefix = ensure_out_prefix(args.out_prefix)
+    logging.info("Output prefix: %s", out_prefix)
 
     logging.info("Loading gene lists from: %s", args.gene_lists_dir)
     membership_df, _list_to_genes = load_gene_lists(
         gene_lists_dir=args.gene_lists_dir,
         gene_key_column=args.gene_key_column,
     )
+
     list_columns = [c for c in membership_df.columns if c not in {"gene_key", "n_lists", "list_names"}]
+    logging.info("List columns: %s", ", ".join(list_columns))
+
+    merged = membership_df.copy()
+    merged["gene_key"] = normalise_gene_key(merged["gene_key"])
 
     # Optional: join to features for gene_id and context columns
-    merged = membership_df.copy()
     if args.features_tsv:
         logging.info("Loading features TSV: %s", args.features_tsv)
         feat = read_tsv(args.features_tsv)
@@ -471,17 +599,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise SystemExit("features_tsv must contain a 'gene_key' column (or match --gene_key_column).")
 
         feat["gene_key"] = normalise_gene_key(feat["gene_key"])
-        merged["gene_key"] = normalise_gene_key(merged["gene_key"])
 
-        # Avoid exploding columns: keep all features, but ensure gene_key uniqueness
         if feat["gene_key"].duplicated().any():
-            logging.warning("features_tsv has duplicated gene_key entries; keeping first occurrence per gene_key")
+            dup_n = int(feat["gene_key"].duplicated().sum())
+            logging.warning(
+                "features_tsv has duplicated gene_key entries (%s); keeping first occurrence per gene_key",
+                dup_n,
+            )
             feat = feat.drop_duplicates(subset=["gene_key"], keep="first")
 
         merged = merged.merge(feat, on="gene_key", how="left")
         logging.info("After merging features: %s rows, %s columns", merged.shape[0], merged.shape[1])
+
+        if args.features_gene_id_column in merged.columns and args.features_gene_id_column != "gene_id":
+            merged = merged.rename(columns={args.features_gene_id_column: "gene_id"})
+            logging.info("Standardised features gene id column to 'gene_id'")
+
+        if "gene_id" in merged.columns:
+            merged["gene_id"] = merged["gene_id"].astype(str).str.strip()
+            missing_gene_id = int((merged["gene_id"] == "").sum())
+            logging.info("gene_id present after features merge; missing gene_id for %s genes", missing_gene_id)
     else:
-        merged["gene_key"] = normalise_gene_key(merged["gene_key"])
+        logging.info("No features TSV provided; proceeding without genomic/regulatory context columns")
 
     # Optional: proteomics
     if args.proteomics_tsv:
@@ -496,12 +635,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         prot = derive_proteomics_class(df=prot)
 
         if prot["gene_key"].duplicated().any():
-            logging.warning("proteomics_tsv has duplicated gene_key entries; keeping best class per gene_key")
-            # Prefer Strong > Detected > None
+            dup_n = int(prot["gene_key"].duplicated().sum())
+            logging.warning(
+                "proteomics_tsv has duplicated gene_key entries (%s); keeping best class per gene_key",
+                dup_n,
+            )
             rank = {"Strong": 2, "Detected": 1, "None": 0, "": -1}
             prot["_prot_rank"] = prot["prot_class"].map(rank).fillna(-1).astype(int)
-            prot = prot.sort_values("_prot_rank", ascending=False).drop_duplicates("gene_key", keep="first")
-            prot = prot.drop(columns=["_prot_rank"])
+            prot = (
+                prot.sort_values("_prot_rank", ascending=False)
+                .drop_duplicates("gene_key", keep="first")
+                .drop(columns=["_prot_rank"])
+            )
 
         keep_cols = ["gene_key", "prot_class"]
         for c in ["prot_present_any", "prot_unique_peptides_max", "prot_coverage_pct_max"]:
@@ -509,10 +654,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 keep_cols.append(c)
 
         merged = merged.merge(prot[keep_cols], on="gene_key", how="left")
-        merged["prot_class"] = merged.get("prot_class", "").replace("", "None")
+
+        # Ensure prot_class is present and does not contain NaN
+        merged["prot_class"] = (
+            merged.get("prot_class", "None")
+            .fillna("None")
+            .replace("", "None")
+        )
+
+        prot_counts = merged["prot_class"].value_counts(dropna=False).to_dict()
         logging.info("After merging proteomics: %s rows, %s columns", merged.shape[0], merged.shape[1])
+        logging.info("Proteomics class counts (post-merge): %s", prot_counts)
     else:
         merged["prot_class"] = "None"
+        logging.info("No proteomics TSV provided; prot_class set to 'None' for all genes")
 
     # Optional: tractability
     if args.tractability_tsv:
@@ -521,14 +676,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.tractability_gene_id_column not in tract.columns:
             raise SystemExit(f"Tractability TSV missing gene id column: {args.tractability_gene_id_column}")
-
-        # Need gene_id to join; prefer gene_id from features, else attempt join by gene_key if present
-        if args.features_gene_id_column in merged.columns:
-            merged_gene_id_col = args.features_gene_id_column
-        elif "gene_id" in merged.columns:
-            merged_gene_id_col = "gene_id"
-        else:
-            merged_gene_id_col = ""
 
         tract = tract.rename(columns={args.tractability_gene_id_column: "gene_id"})
         tract["gene_id"] = tract["gene_id"].astype(str).str.strip()
@@ -545,20 +692,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 tract_keep.append(c)
 
         tract = tract[tract_keep].copy()
+
         if tract["gene_id"].duplicated().any():
+            dup_n = int(tract["gene_id"].duplicated().sum())
+            logging.warning("tractability_tsv has duplicated gene_id entries (%s); keeping first", dup_n)
             tract = tract.drop_duplicates(subset=["gene_id"], keep="first")
 
-        if merged_gene_id_col:
-            merged = merged.rename(columns={merged_gene_id_col: "gene_id"})
+        if "gene_id" in merged.columns and merged["gene_id"].astype(str).str.strip().ne("").any():
             merged["gene_id"] = merged["gene_id"].astype(str).str.strip()
             merged = merged.merge(tract, on="gene_id", how="left")
             logging.info("After merging tractability by gene_id: %s rows, %s columns", merged.shape[0], merged.shape[1])
+
+            tract_any = np.zeros(merged.shape[0], dtype=bool)
+            for c in ["ot_any_small_molecule_tractable", "ot_any_antibody_tractable", "ot_any_protac_tractable"]:
+                if c in merged.columns:
+                    tract_any |= parse_bool_series(merged[c])
+            logging.info("Genes with any tractability signal (post-merge): %s", int(tract_any.sum()))
         else:
             logging.warning(
-                "No gene_id column available to merge tractability. "
-                "Consider providing --features_tsv with gene_id."
+                "No usable gene_id column available to merge tractability. "
+                "Provide --features_tsv containing Ensembl gene_id to enable this step."
             )
+            for c in [
+                "ot_any_small_molecule_tractable",
+                "ot_any_antibody_tractable",
+                "ot_any_protac_tractable",
+                "ot_tractability_summary",
+                "ot_approved_symbol",
+            ]:
+                merged[c] = ""
     else:
+        logging.info("No tractability TSV provided; tractability fields will be empty")
         for c in [
             "ot_any_small_molecule_tractable",
             "ot_any_antibody_tractable",
@@ -566,14 +730,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "ot_tractability_summary",
             "ot_approved_symbol",
         ]:
-            merged[c] = ""
+            if c not in merged.columns:
+                merged[c] = ""
 
     # Novelty excluded lists
     novelty_excluded_lists: Set[str] = set()
     if args.novelty_exclude_list_regex:
         patt = re.compile(args.novelty_exclude_list_regex, flags=re.IGNORECASE)
         novelty_excluded_lists = {c for c in list_columns if patt.search(c)}
-        logging.info("Novelty exclude lists matched by regex '%s': %s", args.novelty_exclude_list_regex, ", ".join(sorted(novelty_excluded_lists)))
+        logging.info(
+            "Novelty exclude lists matched by regex '%s': %s",
+            args.novelty_exclude_list_regex,
+            ", ".join(sorted(novelty_excluded_lists)) if novelty_excluded_lists else "(none)",
+        )
+    else:
+        logging.info("No novelty exclude regex provided; novelty bonus will not be applied")
 
     weights = Weights(
         per_list_member=args.w_per_list_member,
@@ -584,6 +755,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         tract_protac=args.w_tract_protac,
         novelty_bonus=args.w_novelty,
     )
+    logging.info("Scoring weights: %s", weights)
 
     ranked = compute_priority_score(
         df=merged,
@@ -594,20 +766,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Filter: minimum list membership
     ranked["n_lists"] = pd.to_numeric(ranked["n_lists"], errors="coerce").fillna(0).astype(int)
+    before_filter = ranked.shape[0]
     ranked = ranked[ranked["n_lists"] >= int(args.min_lists)].copy()
+    logging.info(
+        "Filter min_lists >= %s: %s -> %s rows",
+        args.min_lists,
+        before_filter,
+        ranked.shape[0],
+    )
 
-    # Sort: primary by priority_score, then by tractability and proteomics as tie-breakers
-    ranked["prot_rank"] = ranked["prot_class"].map({"Strong": 2, "Detected": 1, "None": 0}).fillna(0).astype(int)
+    # Sort: primary by priority_score, then tractability/proteomics/list count as tie-breakers
+    ranked["prot_rank"] = ranked["prot_class"].fillna("None").map({"Strong": 2, "Detected": 1, "None": 0}).fillna(0).astype(int)
     ranked["tract_rank"] = ranked["ot_any_tractable"].astype(int)
 
     ranked = ranked.sort_values(
         by=["priority_score", "tract_rank", "prot_rank", "n_lists", "gene_key"],
         ascending=[False, False, False, False, True],
-    )
+    ).drop(columns=["prot_rank", "tract_rank"], errors="ignore")
 
-    ranked = ranked.drop(columns=["prot_rank", "tract_rank"], errors="ignore")
-
-    # Column ordering: keep the key fields at the front, then everything else
+    # Column ordering
     front = [
         "gene_key",
         "gene_id",
@@ -630,14 +807,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     cols = [c for c in front if c in ranked.columns] + [c for c in ranked.columns if c not in set(front)]
     ranked = ranked[cols]
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.out_tsv)) or ".", exist_ok=True)
-    ranked.to_csv(args.out_tsv, sep="\t", index=False)
-    logging.info("Wrote ranked priorities: %s rows -> %s", ranked.shape[0], args.out_tsv)
+    # Subsets
+    candidate = ranked[ranked["candidate_druggable_sperm_protein"].astype(bool)].copy()
+    logging.info(
+        "Candidates with proteomics + any tractability: %s (of %s ranked)",
+        candidate.shape[0],
+        ranked.shape[0],
+    )
 
-    # Log a short summary for convenience
-    n_druggable = int(ranked["candidate_druggable_sperm_protein"].astype(bool).sum()) if "candidate_druggable_sperm_protein" in ranked.columns else 0
-    logging.info("Candidates with proteomics + any tractability: %s", n_druggable)
+    topn: Optional[pd.DataFrame] = None
+    if int(args.top_n) > 0:
+        topn = ranked.head(int(args.top_n)).copy()
+        logging.info("Prepared top-N subset: %s rows", topn.shape[0])
 
+    # Write outputs
+    write_outputs(out_prefix=out_prefix, ranked=ranked, candidate=candidate, topn=topn)
+
+    elapsed = datetime.now() - start
+    logging.info("Done. Elapsed time: %s", str(elapsed).split(".")[0])
     return 0
 
 
