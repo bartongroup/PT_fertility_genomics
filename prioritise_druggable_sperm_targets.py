@@ -518,7 +518,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         description="Prioritise druggable sperm targets from a master Excel workbook."
     )
     p.add_argument("--excel_in", required=True, help="Input master Excel workbook (biochem annotated).")
-    p.add_argument("--gene_master_sheet", default="Gene_Master", help="Sheet containing per-gene master table.")
+    p.add_argument("--gene_master_sheet", default="Genes_Master", help="Sheet containing per-gene master table.")
     p.add_argument("--tier_sheet", default="Tier_Summary_With_Omics", help="Sheet containing tier/membership booleans.")
     p.add_argument("--gene_key_column", default="gene_key", help="Gene symbol column name (must exist in both sheets).")
 

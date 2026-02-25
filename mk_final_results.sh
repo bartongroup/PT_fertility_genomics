@@ -75,12 +75,10 @@ python ~/data/2026_sperm_Gates/PT_fertility_genomics/final_summary/make_fertilit
 
 
 python ~/data/2026_sperm_Gates/PT_fertility_genomics/prioritise_druggable_sperm_targets.py \
-  --gene_lists_dir genome_resources/gene_lists \
-  --features_tsv genome_resources/gene_context_features_universe_plus_tracks.tsv \
-  --proteomics_tsv genome_resources/gene_lists/proteomics_internal__public__any__A_all.tsv \
-  --tractability_tsv genome_resources/gene_context_features_universe_plus_tractability.tsv \
-  --novelty_exclude_list_regex "literature" \
-  --min_lists 2 \
-  --top_n 50 \
-  --out_prefix results/sperm_target_priorities \
-  --verbose
+  --excel_in ~/data/2026_sperm_Gates/results/FULL_SUMMARY/SUMMARY_fertility_evidence.biochem.xlsx \
+    --gene_master_sheet Gene_Master \
+    --tier_sheet Tier_Summary_With_Omics \
+    --out_prefix ~/data/2026_sperm_Gates/results/FULL_SUMMARY/sperm_target_priorities_from_master \
+    --min_memberships 2 \
+    --top_n 100 \
+    --verbose
