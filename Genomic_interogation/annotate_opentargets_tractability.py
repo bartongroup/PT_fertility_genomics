@@ -119,14 +119,20 @@ query TargetTractability($ensemblId: String!) {
 
 def summarise_tractability(tractability_list: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
     """
-    Convert tractability records into compact flags.
+    Convert tractability records into compact modality flags.
 
-    Open Targets returns multiple records; we collapse into:
-    - any_small_molecule_tractable
-    - any_antibody_tractable
-    - any_protac_tractable
+    Open Targets returns multiple tractability records per target, each with:
+    - modality (e.g. "SM", "AB", "PR", "OC")
+    - label (e.g. "Approved Drug", "High-Quality Pocket")
+    - value (often boolean-like True/False)
 
-    We also keep a compact text summary.
+    We collapse these into:
+    - ot_any_small_molecule_tractable
+    - ot_any_antibody_tractable
+    - ot_any_protac_tractable
+
+    A modality is considered tractable if ANY record for that modality has a
+    truthy value.
     """
     if not tractability_list:
         return {
@@ -141,21 +147,23 @@ def summarise_tractability(tractability_list: Optional[List[Dict[str, Any]]]) ->
     pr = False
     bits: List[str] = []
 
-    for rec in tractability_list:
-        modality = str(rec.get("modality") or "").lower()
-        label = str(rec.get("label") or "")
-        value = rec.get("value")
-        try:
-            v = int(value)
-        except Exception:
-            v = 0
+    def is_truthy(v: Any) -> bool:
+        s = str(v).strip().lower()
+        return s in {"true", "1", "t", "yes", "y"}
 
-        if v == 1:
-            if "small" in modality:
+    for rec in tractability_list:
+        modality = str(rec.get("modality") or "").strip().lower()
+        label = str(rec.get("label") or "").strip()
+        value = rec.get("value")
+
+        truthy = is_truthy(value)
+
+        if truthy:
+            if modality == "sm" or "small" in modality:
                 sm = True
-            if "antibody" in modality:
+            if modality == "ab" or "antibody" in modality:
                 ab = True
-            if "protac" in modality:
+            if modality == "pr" or "protac" in modality:
                 pr = True
 
         if label:
