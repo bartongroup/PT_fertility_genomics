@@ -192,8 +192,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     ensembl_ids = df[args.ensembl_column].astype(str).dropna().drop_duplicates().tolist()
     logging.info("Unique Ensembl IDs to query: %s", len(ensembl_ids))
+    
     if args.max_genes and args.max_genes > 0:
         ensembl_ids = ensembl_ids[: args.max_genes]
+        logging.info("Limiting to max_genes: %s", len(ensembl_ids))
 
     out_rows: List[Dict[str, Any]] = []
     for i, ens in enumerate(ensembl_ids, start=1):
