@@ -60,8 +60,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
-from typing import Dict
-import pandas as pd
+
 import pandas as pd
 
 
@@ -596,9 +595,9 @@ def annotate_accessibility(
         out["uniprot_protein_name"] = recs.map(
             lambda r: r.protein_name if isinstance(r, UniprotRecord) else ""
         )
-    n_found = int(recs.map(lambda r: isinstance(r, UniprotRecord)).sum())
-    n_total = int(recs.shape[0])
-    LOGGER.info("UniProt record hits: %s / %s", n_found, n_total)
+        n_found = int(recs.map(lambda r: isinstance(r, UniprotRecord)).sum())
+        n_total = int(recs.shape[0])
+        LOGGER.info("UniProt record hits: %s / %s", n_found, n_total)
 
 
     # Feature flags
