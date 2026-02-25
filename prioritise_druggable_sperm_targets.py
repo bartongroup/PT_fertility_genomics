@@ -669,6 +669,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ranked = scored[scored["n_memberships"] >= int(args.min_memberships)].copy()
     logging.info("Filter min_memberships >= %s: %s -> %s rows", args.min_memberships, before, ranked.shape[0])
 
+    if "ot_any_tractable" in ranked.columns:
+        logging.info(
+            "Tractability any=True (ranked): %s",
+            int(ranked["ot_any_tractable"].astype(bool).sum()),
+        )
+    else:
+        logging.info("Tractability columns not present in workbook; ot_any_tractable will be False for all rows")
+
     # Sort with tie-breakers
     ranked["prot_rank"] = ranked["prot_class"].map({"Strong": 2, "Detected": 1, "None": 0}).fillna(0).astype(int)
     ranked["tract_rank"] = ranked.get("ot_any_tractable", False).astype(int)
@@ -678,8 +686,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ).drop(columns=["prot_rank", "tract_rank"], errors="ignore")
 
 
-    prot_counts = out["prot_class"].value_counts(dropna=False).to_dict()
-    logging.info("Proteomics class counts: %s", prot_counts)
+    prot_counts_all = scored["prot_class"].value_counts(dropna=False).to_dict()
+    logging.info("Proteomics class counts (all scored genes): %s", prot_counts_all)
+
+    prot_counts_ranked = ranked["prot_class"].value_counts(dropna=False).to_dict()
+    logging.info("Proteomics class counts (ranked after filters): %s", prot_counts_ranked)
+
+
     # Candidate subset
     candidate = ranked[ranked["candidate_druggable_sperm_protein"].astype(bool)].copy()
 
