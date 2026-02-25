@@ -60,7 +60,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
-
+import json
+import time
+import urllib.parse
+import urllib.request
+from urllib.error import HTTPError, URLError
 import pandas as pd
 
 
@@ -123,6 +127,114 @@ def _read_genes_master_from_excel(
     df = pd.read_excel(excel_path, sheet_name=sheet_name, dtype=str)
     return df
 
+
+def _chunked(values: List[str], chunk_size: int) -> Iterable[List[str]]:
+    """
+    Yield list chunks.
+
+    Parameters
+    ----------
+    values : List[str]
+        List of values.
+    chunk_size : int
+        Chunk size.
+
+    Yields
+    ------
+    List[str]
+        Chunks of values.
+    """
+    for i in range(0, len(values), chunk_size):
+        yield values[i : i + chunk_size]
+
+
+def fetch_uniprot_accessions_for_genes_online(
+    gene_symbols: List[str],
+    organism_taxon_id: str = "9606",
+    chunk_size: int = 200,
+    timeout_s: int = 60,
+    sleep_s: float = 0.2,
+) -> Dict[str, str]:
+    """
+    Map gene symbols to UniProt accessions using the UniProt REST API.
+
+    This uses UniProtKB search with a query of the form:
+      (gene_exact:GENE1 OR gene_exact:GENE2 ...) AND organism_id:9606 AND reviewed:true
+
+    Parameters
+    ----------
+    gene_symbols : List[str]
+        Gene symbols (HGNC), ideally uppercased.
+    organism_taxon_id : str
+        NCBI taxonomy ID (default 9606 = human).
+    chunk_size : int
+        Number of genes to query per request.
+    timeout_s : int
+        Request timeout in seconds.
+    sleep_s : float
+        Sleep between requests to be polite.
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping from gene symbol to UniProt accession. If multiple accessions
+        exist for a gene, the first returned is used.
+    """
+    base_url = "https://rest.uniprot.org/uniprotkb/search"
+    out: Dict[str, str] = {}
+
+    cleaned = [g.strip().upper() for g in gene_symbols if g and str(g).strip()]
+    cleaned = sorted(set(cleaned))
+
+    if not cleaned:
+        return out
+
+    LOGGER.info("Online UniProt mapping: querying %s gene symbols", len(cleaned))
+
+    for chunk in _chunked(cleaned, chunk_size=chunk_size):
+        gene_q = " OR ".join([f"gene_exact:{urllib.parse.quote(g)}" for g in chunk])
+        query = f"({gene_q}) AND organism_id:{organism_taxon_id} AND reviewed:true"
+
+        params = {
+            "query": query,
+            "format": "tsv",
+            "fields": "accession,gene_primary",
+            "size": "500",
+        }
+        url = base_url + "?" + urllib.parse.urlencode(params)
+
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "PT_fertility_genomics/annotate_biochem_accessibility"},
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+        except (HTTPError, URLError, TimeoutError) as exc:
+            LOGGER.warning("UniProt mapping request failed for chunk (%s genes): %s", len(chunk), exc)
+            time.sleep(sleep_s)
+            continue
+
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        if len(lines) <= 1:
+            time.sleep(sleep_s)
+            continue
+
+        # Header: Accession \t Gene Names (primary)
+        for ln in lines[1:]:
+            parts = ln.split("\t")
+            if len(parts) < 2:
+                continue
+            acc = parts[0].strip()
+            gene_primary = parts[1].strip().upper()
+            if acc and gene_primary and gene_primary not in out:
+                out[gene_primary] = acc
+
+        time.sleep(sleep_s)
+
+    LOGGER.info("Online UniProt mapping: recovered %s gene->accession pairs", len(out))
+    return out
 
 def _write_updated_excel(
     original_excel: Path,
@@ -512,12 +624,16 @@ def load_uniprot_annotation_table(uniprot_tsv: Path) -> Dict[str, UniprotRecord]
     return records
 
 
+
 def annotate_accessibility(
     df: pd.DataFrame,
     gene_col: str,
     uniprot_acc_col: str,
     gene_to_uniprot: Optional[Dict[str, str]],
     uniprot_records: Optional[Dict[str, UniprotRecord]],
+    online_uniprot_mapping: bool = False,
+    online_mapping_chunk_size: int = 200,
+    online_mapping_timeout_s: int = 60,
 ) -> pd.DataFrame:
     """
     Annotate accessibility fields onto the input table.
@@ -553,6 +669,27 @@ def annotate_accessibility(
         out[uniprot_acc_col] = ""
 
     out[uniprot_acc_col] = out[uniprot_acc_col].fillna("").map(_normalise_uniprot_acc)
+
+    if online_uniprot_mapping:
+        missing_mask = out[uniprot_acc_col].astype(str).str.strip() == ""
+        n_missing = int(missing_mask.sum())
+        if n_missing > 0:
+            LOGGER.info("Attempting online UniProt mapping for %s genes with missing accessions", n_missing)
+            genes_missing = out.loc[missing_mask, gene_col].fillna("").astype(str).tolist()
+
+            online_map = fetch_uniprot_accessions_for_genes_online(
+                gene_symbols=genes_missing,
+                organism_taxon_id="9606",
+                chunk_size=online_mapping_chunk_size,
+                timeout_s=online_mapping_timeout_s,
+            )
+
+            n_before = int((out[uniprot_acc_col].astype(str).str.strip() != "").sum())
+            out.loc[missing_mask, uniprot_acc_col] = (
+                out.loc[missing_mask, gene_col].map(online_map).fillna("")
+            )
+            n_after = int((out[uniprot_acc_col].astype(str).str.strip() != "").sum())
+            LOGGER.info("Online mapping filled %s accessions (now %s non-empty total)", n_after - n_before, n_after)
 
     if gene_to_uniprot is not None:
         missing_mask = out[uniprot_acc_col].astype(str).str.strip() == ""
@@ -646,7 +783,6 @@ def annotate_accessibility(
             out["uniprot_protein_name"].fillna(""),
             out["uniprot_keywords"].fillna(""),
             out["uniprot_go_cc"].fillna(""),
-            strict=False,
         )
     ]
 
@@ -662,7 +798,6 @@ def annotate_accessibility(
             out["is_secreted"].fillna(False),
             out["is_membrane"].fillna(False),
             out["predicted_target_class"].fillna("unknown"),
-            strict=False,
         )
     ]
 
@@ -759,6 +894,31 @@ def parse_args() -> argparse.Namespace:
             "If set, this file is used instead of results/<testis_run_id>/08_proteomics_annotation/..."
         ),
     )
+
+    p.add_argument(
+        "--online_uniprot_mapping",
+        action="store_true",
+        help=(
+            "If set, attempt to fetch UniProt accessions for genes lacking uniprot_acc "
+            "using the UniProt REST API (human reviewed)."
+        ),
+    )
+
+    p.add_argument(
+        "--online_mapping_chunk_size",
+        required=False,
+        type=int,
+        default=200,
+        help="Chunk size for UniProt online mapping queries (default: 200).",
+    )
+
+    p.add_argument(
+        "--online_mapping_timeout_s",
+        required=False,
+        type=int,
+        default=60,
+        help="Timeout in seconds for UniProt online mapping requests (default: 60).",
+    )
     p.add_argument(
         "--verbose",
         action="store_true",
@@ -795,12 +955,16 @@ def main() -> None:
 
     LOGGER.info("Annotating biochemical accessibility")
 
+
     annotated = annotate_accessibility(
         df=df,
         gene_col=args.gene_column,
         uniprot_acc_col=args.uniprot_acc_column,
         gene_to_uniprot=gene_to_uniprot,
         uniprot_records=uniprot_records,
+        online_uniprot_mapping=args.online_uniprot_mapping,
+        online_mapping_chunk_size=args.online_mapping_chunk_size,
+        online_mapping_timeout_s=args.online_mapping_timeout_s,
     )
 
     LOGGER.info("Writing updated Excel workbook")
