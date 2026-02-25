@@ -735,7 +735,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         help="Sheet to annotate (default: Genes_Master).",
     )
-    parser.add_argument(
+    p.add_argument(
         "--testis_annotated_override_tsv",
         required=False,
         type=Path,

@@ -64,9 +64,9 @@ python ~/data/2026_sperm_Gates/PT_fertility_genomics/final_summary/make_fertilit
 # add biochem properties
 
 
-python ~/data/2026_sperm_Gates/PT_fertility_genomics/nnotate_sperm_biochemical_accessibility.py \
+python ~/data/2026_sperm_Gates/PT_fertility_genomics/annotate_sperm_biochemical_accessibility.py \
   --excel_in /home/pthorpe001/data/2026_sperm_Gates/results/FULL_SUMMARY/SUMMARY_fertility_evidence.xlsx \
   --excel_out /home/pthorpe001/data/2026_sperm_Gates/results/FULL_SUMMARY/SUMMARY_fertility_evidence.biochem.xlsx \
-  --uniprot_annotation_tsv uniprotkb_reviewed_true_2026_02_25.tsv
+  --uniprot_annotation_tsv /home/pthorpe001/data/2026_sperm_Gates/genome_resources/uniprot/uniprotkb_reviewed_true_2026_02_25.tsv
 
 
