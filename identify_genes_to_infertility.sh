@@ -144,3 +144,6 @@ python "${SCRIPTS_DIR}/overlap_testis_specific_with_clinvar_tiers.py" \
 
 echo "Pipeline completed successfully."
 echo "Results written to: ${RESULTS_DIR}"
+
+
+

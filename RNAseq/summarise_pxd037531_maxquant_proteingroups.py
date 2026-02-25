@@ -3,66 +3,37 @@
 """
 summarise_pxd037531_maxquant_proteingroups.py
 
-Convert MaxQuant 'proteinGroups.txt' (PXD037531; Greither et al., 2023) into a
-gene-level proteomics evidence table suitable for merging into a master sperm /
-testis candidate gene summary table.
+Summarise MaxQuant proteinGroups.txt into a gene-level proteomics evidence TSV.
 
-This script is designed for datasets where MaxQuant reports protein group-level
-identifications across many samples (columns such as 'LFQ intensity <sample>' or
-'Intensity <sample>' and peptide count columns).
+This version maps UniProt accessions to gene symbols via either:
+1) A FASTA file used by MaxQuant (preferred; fully offline), or
+2) A prebuilt UniProt accession → gene_key TSV mapping file.
 
 Filtering
 ---------
-By default removes entries flagged as:
-- Reverse
-- Potential contaminant
-- Only identified by site
-
-Gene symbol extraction
-----------------------
-Primary: parse 'GN=<symbol>' from 'Fasta headers' (MaxQuant/UniProt style).
-Fallback: attempt to parse gene symbol from 'Majority protein IDs' where a
-'GN=' token exists (rare).
-If no gene symbol can be extracted, the row is discarded (can be relaxed with
---keep_missing_gene).
-
-Presence definition
--------------------
-Presence per sample is called if the chosen per-sample quantitative field is
-present and > 0 for that sample.
-- Default quant field: LFQ intensity
-- Alternative: Intensity (use --use_intensity)
+Removes rows flagged as Reverse, Potential contaminant, Only identified by site.
 
 Outputs
 -------
-A tab-separated file with one row per gene_key, including:
-- gene_key
-- prot_present_any
-- prot_present_fraction
-- prot_n_samples_present
-- prot_n_samples_total
-- prot_peptide_counts_razor_unique_max
-- prot_peptide_counts_unique_max
-- prot_sequence_coverage_pct_max
-- prot_min_q_value
-- prot_max_lfq_intensity (or prot_max_intensity)
-- optional per-sample presence columns (prot_present__<sample>)
+Tab-separated gene-level evidence table for merging into master summary tables.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
-import csv
 import sys
 
 csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
+
 
 def parse_args() -> argparse.Namespace:
     """
@@ -74,10 +45,7 @@ def parse_args() -> argparse.Namespace:
         Parsed arguments.
     """
     parser = argparse.ArgumentParser(
-        description=(
-            "Summarise MaxQuant proteinGroups.txt into a gene-level proteomics "
-            "evidence TSV for downstream annotation."
-        )
+        description="Summarise MaxQuant proteinGroups.txt into a gene-level proteomics TSV."
     )
     parser.add_argument(
         "--protein_groups_tsv",
@@ -92,20 +60,29 @@ def parse_args() -> argparse.Namespace:
         help="Output gene-level TSV path.",
     )
     parser.add_argument(
-        "--keep_missing_gene",
-        action="store_true",
+        "--fasta",
+        required=False,
+        type=Path,
+        default=None,
         help=(
-            "If set, retain rows where a gene symbol cannot be extracted, "
-            "using the first Majority protein ID as gene_key fallback."
+            "Optional FASTA used by MaxQuant. If provided, build UniProt accession → gene mapping "
+            "from FASTA headers."
+        ),
+    )
+    parser.add_argument(
+        "--uniprot_to_gene_tsv",
+        required=False,
+        type=Path,
+        default=None,
+        help=(
+            "Optional TSV mapping file with columns: uniprot_accession, gene_key. "
+            "Used if --fasta is not provided."
         ),
     )
     parser.add_argument(
         "--use_intensity",
         action="store_true",
-        help=(
-            "If set, use per-sample 'Intensity ' columns for presence calls "
-            "instead of 'LFQ intensity '."
-        ),
+        help="If set, use per-sample 'Intensity ' columns instead of 'LFQ intensity '.",
     )
     parser.add_argument(
         "--presence_threshold",
@@ -141,48 +118,158 @@ def _normalise_gene_symbol(value: str) -> str:
     return v.upper()
 
 
-def _extract_gn_from_fasta_headers(headers: str) -> Optional[str]:
+def _read_tsv(path: Path) -> pd.DataFrame:
     """
-    Extract GN= gene symbol from a MaxQuant 'Fasta headers' field.
+    Read a TSV safely, allowing very large fields.
 
     Parameters
     ----------
-    headers : str
-        'Fasta headers' field (often semicolon-separated).
+    path : Path
+        Input file path.
 
     Returns
     -------
-    Optional[str]
-        Normalised gene symbol if found, else None.
+    pd.DataFrame
+        Loaded DataFrame.
     """
-    if headers is None or str(headers).strip() == "":
-        return None
-    m = re.search(r"\bGN=([A-Za-z0-9\-]+)\b", str(headers))
-    if not m:
-        return None
-    return _normalise_gene_symbol(m.group(1))
+    csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
+    try:
+        df = pd.read_csv(path, sep="\t", dtype=str, engine="c")
+    except Exception:
+        df = pd.read_csv(path, sep="\t", dtype=str, engine="python")
+
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
 
 
-def _fallback_gene_key_from_majority_ids(majority_ids: str) -> Optional[str]:
+def _extract_uniprot_accessions(value: str) -> List[str]:
     """
-    Fallback gene key if GN= is missing: use first Majority protein ID.
+    Extract UniProt accessions from a MaxQuant protein ID field.
 
     Parameters
     ----------
-    majority_ids : str
-        'Majority protein IDs' field (often ';' separated UniProt accessions).
+    value : str
+        Protein IDs field (often ';' separated accessions).
 
     Returns
     -------
-    Optional[str]
-        A fallback key (uppercase) or None.
+    List[str]
+        List of accessions (uppercased), isoform suffix preserved.
     """
-    if majority_ids is None or str(majority_ids).strip() == "":
-        return None
-    first = str(majority_ids).split(";")[0].strip()
-    if first == "":
-        return None
-    return first.upper()
+    if value is None:
+        return []
+    items = [x.strip() for x in str(value).split(";") if x.strip() != ""]
+    return [x.upper() for x in items]
+
+
+def _strip_isoform(accession: str) -> str:
+    """
+    Strip UniProt isoform suffix (e.g. P12345-2 -> P12345).
+
+    Parameters
+    ----------
+    accession : str
+        UniProt accession.
+
+    Returns
+    -------
+    str
+        Base accession.
+    """
+    return accession.split("-")[0].upper()
+
+
+def _parse_fasta_accession_and_gene(header: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Parse accession and gene symbol from a FASTA header.
+
+    Supports common UniProt-style headers:
+    >sp|P12345|ENTRY_HUMAN ... GN=GENE ...
+
+    Parameters
+    ----------
+    header : str
+        FASTA header line (without newline).
+
+    Returns
+    -------
+    Tuple[Optional[str], Optional[str]]
+        (accession, gene_symbol) if detected, otherwise (None, None).
+    """
+    h = header.strip()
+    if not h.startswith(">"):
+        return (None, None)
+
+    # Accession from UniProt-style header
+    m_acc = re.search(r"\b(?:sp|tr)\|([A-Z0-9]+(?:-[0-9]+)?)\|", h)
+    acc = m_acc.group(1).upper() if m_acc else None
+
+    # Gene symbol token (if present)
+    m_gn = re.search(r"\bGN=([A-Za-z0-9\-]+)\b", h)
+    gene = _normalise_gene_symbol(m_gn.group(1)) if m_gn else None
+
+    return (acc, gene)
+
+
+def build_uniprot_to_gene_map_from_fasta(fasta_path: Path) -> Dict[str, str]:
+    """
+    Build UniProt accession → gene_key mapping from a FASTA file.
+
+    Parameters
+    ----------
+    fasta_path : Path
+        FASTA path.
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping of base accession (no isoform suffix) to gene_key.
+    """
+    mapping: Dict[str, str] = {}
+    with fasta_path.open("r", errors="replace") as handle:
+        for line in handle:
+            if not line.startswith(">"):
+                continue
+            acc, gene = _parse_fasta_accession_and_gene(header=line)
+            if acc is None or gene is None:
+                continue
+            mapping[_strip_isoform(acc)] = gene
+    return mapping
+
+
+def load_uniprot_to_gene_map_from_tsv(mapping_tsv: Path) -> Dict[str, str]:
+    """
+    Load UniProt accession → gene_key mapping from TSV.
+
+    Required columns: uniprot_accession, gene_key
+
+    Parameters
+    ----------
+    mapping_tsv : Path
+        TSV path.
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping of base accession to gene_key.
+    """
+    df = pd.read_csv(mapping_tsv, sep="\t", dtype=str)
+    cols = [c.strip() for c in df.columns]
+    df.columns = cols
+
+    if "uniprot_accession" not in df.columns or "gene_key" not in df.columns:
+        raise ValueError(
+            "Mapping TSV must contain columns: uniprot_accession, gene_key"
+        )
+
+    out: Dict[str, str] = {}
+    for _, row in df.iterrows():
+        acc = str(row["uniprot_accession"]).strip().upper()
+        gene = str(row["gene_key"]).strip()
+        if acc == "" or gene == "":
+            continue
+        out[_strip_isoform(acc)] = _normalise_gene_symbol(gene)
+    return out
 
 
 def _to_numeric(series: pd.Series) -> pd.Series:
@@ -202,30 +289,11 @@ def _to_numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
 
 
-def _find_sample_columns(df: pd.DataFrame, prefix: str) -> List[str]:
-    """
-    Identify per-sample columns by a prefix (e.g. 'LFQ intensity ').
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input DataFrame.
-    prefix : str
-        Column prefix.
-
-    Returns
-    -------
-    List[str]
-        Matching columns.
-    """
-    return [c for c in df.columns if str(c).startswith(prefix)]
-
-
 def build_gene_level_table(
     protein_groups_path: Path,
+    uniprot_to_gene: Dict[str, str],
     use_intensity: bool,
     presence_threshold: float,
-    keep_missing_gene: bool,
     write_per_sample_columns: bool,
 ) -> pd.DataFrame:
     """
@@ -234,13 +302,13 @@ def build_gene_level_table(
     Parameters
     ----------
     protein_groups_path : Path
-        Path to proteinGroups.txt (tab-delimited).
+        Path to proteinGroups.txt.
+    uniprot_to_gene : Dict[str, str]
+        Mapping from UniProt base accession to gene_key.
     use_intensity : bool
         If True, use 'Intensity ' columns; else use 'LFQ intensity ' columns.
     presence_threshold : float
         Threshold above which a sample is considered present.
-    keep_missing_gene : bool
-        If True, keep rows lacking GN= by using a fallback gene_key.
     write_per_sample_columns : bool
         If True, include per-sample presence columns.
 
@@ -249,41 +317,40 @@ def build_gene_level_table(
     pd.DataFrame
         Gene-level table.
     """
-    df = pd.read_csv(protein_groups_path, sep="\t", dtype=str, engine="python")
-    df.columns = [str(c).strip() for c in df.columns]
+    df = _read_tsv(path=protein_groups_path)
 
     # Standard MaxQuant filter flags
     for flag_col in ["Reverse", "Potential contaminant", "Only identified by site"]:
         if flag_col in df.columns:
             df = df[df[flag_col].fillna("") != "+"].copy()
 
-    # Gene symbol extraction
-    if "Fasta headers" not in df.columns:
-        raise ValueError("Expected column 'Fasta headers' not found in proteinGroups.txt")
+    if "Majority protein IDs" not in df.columns:
+        raise ValueError("Expected column 'Majority protein IDs' not found.")
 
-    df["gene_key"] = df["Fasta headers"].map(_extract_gn_from_fasta_headers)
+    # Map protein groups → gene_key (use first mapped accession)
+    maj = df["Majority protein IDs"].fillna("").astype(str)
+    acc_lists = maj.map(_extract_uniprot_accessions)
 
-    if keep_missing_gene:
-        if "Majority protein IDs" in df.columns:
-            mask = df["gene_key"].isna()
-            df.loc[mask, "gene_key"] = df.loc[mask, "Majority protein IDs"].map(
-                _fallback_gene_key_from_majority_ids
-            )
+    gene_keys: List[Optional[str]] = []
+    for accs in acc_lists.tolist():
+        g = None
+        for a in accs:
+            base = _strip_isoform(a)
+            if base in uniprot_to_gene:
+                g = uniprot_to_gene[base]
+                break
+        gene_keys.append(g)
 
+    df["gene_key"] = gene_keys
     df = df[df["gene_key"].notna()].copy()
     df["gene_key"] = df["gene_key"].astype(str)
 
     # Quant columns for presence calls
     quant_prefix = "Intensity " if use_intensity else "LFQ intensity "
-    sample_cols = _find_sample_columns(df=df, prefix=quant_prefix)
-
+    sample_cols = [c for c in df.columns if str(c).startswith(quant_prefix)]
     if not sample_cols:
-        raise ValueError(
-            f"No per-sample quant columns found with prefix '{quant_prefix}'. "
-            f"Available columns include: {df.columns[:30].tolist()} ..."
-        )
+        raise ValueError(f"No per-sample quant columns found with prefix '{quant_prefix}'.")
 
-    # Parse per-sample quantities and call presence
     quant = df[sample_cols].apply(_to_numeric)
     present = quant.notna() & (quant > float(presence_threshold))
 
@@ -303,7 +370,8 @@ def build_gene_level_table(
     df["_coverage_pct"] = _to_numeric(df[coverage_col]) if coverage_col in df.columns else np.nan
     df["_q_value"] = _to_numeric(df[qval_col]) if qval_col in df.columns else np.nan
 
-    # Summarise to gene-level (max evidence across protein groups for that gene)
+    df["_max_quant"] = quant.max(axis=1)
+
     agg = {
         "_present_any": "max",
         "_present_fraction": "max",
@@ -313,11 +381,13 @@ def build_gene_level_table(
         "_pep_unique": "max",
         "_coverage_pct": "max",
         "_q_value": "min",
+        "_max_quant": "max",
     }
 
     gene = df.groupby("gene_key", as_index=False).agg(agg)
 
-    # Rename outputs
+    max_quant_col = "prot_max_intensity" if use_intensity else "prot_max_lfq_intensity"
+
     gene = gene.rename(
         columns={
             "_present_any": "prot_present_any",
@@ -328,20 +398,15 @@ def build_gene_level_table(
             "_pep_unique": "prot_peptide_counts_unique_max",
             "_coverage_pct": "prot_sequence_coverage_pct_max",
             "_q_value": "prot_min_q_value",
+            "_max_quant": max_quant_col,
         }
     )
 
-    # Add max overall intensity metric at gene level
-    df["_max_quant"] = quant.max(axis=1)
-    max_quant_gene = df.groupby("gene_key", as_index=False)["_max_quant"].max()
-    max_quant_col = "prot_max_intensity" if use_intensity else "prot_max_lfq_intensity"
-    max_quant_gene = max_quant_gene.rename(columns={"_max_quant": max_quant_col})
-    gene = gene.merge(max_quant_gene, on="gene_key", how="left")
-
     if write_per_sample_columns:
-        # Per-sample presence columns collapsed to gene-level (any protein group present)
         present_bool = present.copy()
-        present_bool.columns = [f"prot_present__{c.replace(quant_prefix, '').strip()}" for c in present_bool.columns]
+        present_bool.columns = [
+            f"prot_present__{c.replace(quant_prefix, '').strip()}" for c in present_bool.columns
+        ]
         tmp = pd.concat([df[["gene_key"]].reset_index(drop=True), present_bool.reset_index(drop=True)], axis=1)
         per_sample = tmp.groupby("gene_key", as_index=False).max()
         gene = gene.merge(per_sample, on="gene_key", how="left")
@@ -361,18 +426,24 @@ def main() -> None:
     """
     args = parse_args()
 
+    if args.fasta is not None:
+        uniprot_to_gene = build_uniprot_to_gene_map_from_fasta(fasta_path=args.fasta)
+    elif args.uniprot_to_gene_tsv is not None:
+        uniprot_to_gene = load_uniprot_to_gene_map_from_tsv(mapping_tsv=args.uniprot_to_gene_tsv)
+    else:
+        raise ValueError("Provide either --fasta or --uniprot_to_gene_tsv for accession→gene mapping.")
+
     out = build_gene_level_table(
         protein_groups_path=args.protein_groups_tsv,
+        uniprot_to_gene=uniprot_to_gene,
         use_intensity=bool(args.use_intensity),
         presence_threshold=float(args.presence_threshold),
-        keep_missing_gene=bool(args.keep_missing_gene),
         write_per_sample_columns=bool(args.write_per_sample_columns),
     )
 
     args.out_tsv.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(args.out_tsv, sep="\t", index=False)
 
-    print(f"Proteins table: {args.protein_groups_tsv}")
     print(f"Genes in output: {len(out)}")
     print(f"Genes present in >=1 sample: {int(out['prot_present_any'].sum())}")
     print(f"Wrote: {args.out_tsv}")
