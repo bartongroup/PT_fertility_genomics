@@ -60,7 +60,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
-
+from typing import Dict
+import pandas as pd
 import pandas as pd
 
 
@@ -97,6 +98,62 @@ def _configure_logging(verbose: bool) -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
+
+def _read_genes_master_from_excel(
+    excel_path: Path,
+    sheet_name: str = "Genes_Master",
+) -> pd.DataFrame:
+    """
+    Read the Genes_Master sheet from Excel.
+
+    Parameters
+    ----------
+    excel_path : Path
+        Path to Excel workbook.
+    sheet_name : str
+        Sheet name to read.
+
+    Returns
+    -------
+    pd.DataFrame
+        Genes_Master table.
+    """
+    if not excel_path.exists():
+        raise FileNotFoundError(f"Excel file not found: {excel_path}")
+
+    df = pd.read_excel(excel_path, sheet_name=sheet_name, dtype=str)
+    return df
+
+
+def _write_updated_excel(
+    original_excel: Path,
+    updated_genes_master: pd.DataFrame,
+    out_excel: Path,
+    sheet_name: str = "Genes_Master",
+) -> None:
+    """
+    Copy Excel workbook and replace Genes_Master sheet.
+
+    Parameters
+    ----------
+    original_excel : Path
+        Source workbook.
+    updated_genes_master : pd.DataFrame
+        Annotated Genes_Master.
+    out_excel : Path
+        Output workbook.
+    sheet_name : str
+        Sheet to replace.
+    """
+    xls = pd.ExcelFile(original_excel)
+
+    with pd.ExcelWriter(out_excel, engine="openpyxl") as writer:
+        for sheet in xls.sheet_names:
+            if sheet == sheet_name:
+                updated_genes_master.to_excel(writer, sheet_name=sheet, index=False)
+            else:
+                df = pd.read_excel(original_excel, sheet_name=sheet, dtype=str)
+                df.to_excel(writer, sheet_name=sheet, index=False)
 
 def _read_tsv(path: Path) -> pd.DataFrame:
     """
@@ -657,6 +714,27 @@ def parse_args() -> argparse.Namespace:
             "signal peptide, transmembrane, and protein name."
         ),
     )
+    p.add_argument(
+        "--excel_in",
+        required=True,
+        type=Path,
+        help="Input Excel workbook (e.g. SUMMARY_fertility_evidence.xlsx)",
+    )
+
+    p.add_argument(
+        "--excel_out",
+        required=True,
+        type=Path,
+        help="Output Excel workbook with annotated Genes_Master sheet.",
+    )
+
+    p.add_argument(
+        "--sheet_name",
+        required=False,
+        default="Genes_Master",
+        type=str,
+        help="Sheet to annotate (default: Genes_Master).",
+    )
     parser.add_argument(
         "--testis_annotated_override_tsv",
         required=False,
@@ -675,6 +753,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+
 def main() -> None:
     """
     Entry point.
@@ -682,25 +761,25 @@ def main() -> None:
     args = parse_args()
     _configure_logging(verbose=args.verbose)
 
-    if not args.in_tsv.exists():
-        raise FileNotFoundError(f"Input not found: {args.in_tsv}")
+    LOGGER.info("Loading Genes_Master from Excel")
+    df = _read_genes_master_from_excel(
+        excel_path=args.excel_in,
+        sheet_name=args.sheet_name,
+    )
 
-    df = _read_tsv(args.in_tsv)
-    LOGGER.info("Loaded input table: %s rows, %s columns", df.shape[0], df.shape[1])
+    LOGGER.info("Loaded %s rows", df.shape[0])
 
     gene_to_uniprot = None
     if args.gene_to_uniprot_tsv is not None:
         if args.gene_to_uniprot_tsv.exists() and args.gene_to_uniprot_tsv.stat().st_size > 0:
             gene_to_uniprot = load_gene_to_uniprot_mapping(args.gene_to_uniprot_tsv)
-        else:
-            LOGGER.warning("gene_to_uniprot_tsv provided but not found/empty: %s", args.gene_to_uniprot_tsv)
 
     uniprot_records = None
     if args.uniprot_annotation_tsv is not None:
         if args.uniprot_annotation_tsv.exists() and args.uniprot_annotation_tsv.stat().st_size > 0:
             uniprot_records = load_uniprot_annotation_table(args.uniprot_annotation_tsv)
-        else:
-            LOGGER.warning("uniprot_annotation_tsv provided but not found/empty: %s", args.uniprot_annotation_tsv)
+
+    LOGGER.info("Annotating biochemical accessibility")
 
     annotated = annotate_accessibility(
         df=df,
@@ -710,15 +789,17 @@ def main() -> None:
         uniprot_records=uniprot_records,
     )
 
-    LOGGER.info(
-        "Accessibility summary: surface=%s, secreted=%s, membrane=%s",
-        int(annotated["is_cell_surface_candidate"].sum()),
-        int(annotated["is_secreted"].sum()),
-        int(annotated["is_membrane"].sum()),
+    LOGGER.info("Writing updated Excel workbook")
+
+    _write_updated_excel(
+        original_excel=args.excel_in,
+        updated_genes_master=annotated,
+        out_excel=args.excel_out,
+        sheet_name=args.sheet_name,
     )
 
-    _write_tsv(annotated, args.out_tsv)
-    LOGGER.info("Wrote: %s", args.out_tsv)
+    LOGGER.info("Done: %s", args.excel_out)
+
 
 
 if __name__ == "__main__":
