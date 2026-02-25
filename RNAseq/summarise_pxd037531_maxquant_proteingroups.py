@@ -59,6 +59,10 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+import csv
+import sys
+
+csv.field_size_limit(min(sys.maxsize, 2**31 - 1))
 
 def parse_args() -> argparse.Namespace:
     """
