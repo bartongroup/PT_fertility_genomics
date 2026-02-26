@@ -587,13 +587,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="ensembl_gene_id",
         help="Ensembl gene id column in Genes_Master (e.g. ensembl_gene_id).",
     )
-    p.add_argument(
-        "--strip_ensembl_version",
-        action="store_true",
-        help="If set, strip version suffix from Ensembl IDs (e.g. ENSG... .2 -> ENSG...).",
-    )
+
     p.add_argument("--tractability_tsv", default="", help="Optional TSV containing Open Targets tractability fields.")
     p.add_argument("--tractability_gene_id_column", default="gene_id", help="Gene id column in tractability TSV.")
+
+    p.add_argument("--strip_ensembl_version", action="store_true", help="Strip .<version> from Ensembl IDs before merging.")
 
     # Weights
     p.add_argument("--w_per_membership", type=float, default=1.0)
@@ -612,8 +610,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """Run the prioritisation workflow."""
+    """
+    Run the prioritisation workflow.
+
+    This version:
+    - normalises gene_key early and de-duplicates by gene_key
+    - creates gene_id ONCE from args.gene_id_column (default: ensembl_gene_id)
+    - merges Open Targets tractability ONCE (optional) into gene_master
+    - then merges tier/membership columns
+    - computes score, filters, sorts, and writes TSV+XLSX outputs
+    """
     args = parse_args(argv)
     setup_logger(verbose=args.verbose)
     start = datetime.now()
@@ -629,30 +637,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     gene_master = read_excel_sheet(args.excel_in, args.gene_master_sheet)
     tier = read_excel_sheet(args.excel_in, args.tier_sheet)
 
-    if args.gene_id_column not in gene_master.columns:
-        logging.warning(
-            "Gene id column '%s' not found in Genes_Master; tractability merge by gene_id will not be possible",
-            args.gene_id_column,
-        )
-    else:
-        gene_master["gene_id"] = normalise_ensembl_gene_id(
-            gene_master[args.gene_id_column],
-            strip_version=bool(args.strip_ensembl_version),
-        )
-        logging.info("Using gene_id column from Genes_Master: %s -> 'gene_id'", args.gene_id_column)
-
-    # Normalise gene_key
+    # Validate required columns
     if args.gene_key_column not in gene_master.columns:
         raise SystemExit(f"Missing '{args.gene_key_column}' in sheet {args.gene_master_sheet}")
     if args.gene_key_column not in tier.columns:
         raise SystemExit(f"Missing '{args.gene_key_column}' in sheet {args.tier_sheet}")
 
+    # Normalise gene_key early (needed for all merges)
     gene_master = gene_master.copy()
     tier = tier.copy()
     gene_master[args.gene_key_column] = normalise_gene_key(gene_master[args.gene_key_column])
     tier[args.gene_key_column] = normalise_gene_key(tier[args.gene_key_column])
 
-    # De-duplicate gene_key rows conservatively
+    # De-duplicate by gene_key conservatively
     if gene_master[args.gene_key_column].duplicated().any():
         dup_n = int(gene_master[args.gene_key_column].duplicated().sum())
         logging.warning("Gene_Master has duplicated gene_key entries (%s); keeping first", dup_n)
@@ -666,29 +663,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.info("Gene_Master: %s rows, %s columns", gene_master.shape[0], gene_master.shape[1])
     logging.info("Tier sheet: %s rows, %s columns", tier.shape[0], tier.shape[1])
 
-    # Detect membership columns
-    membership_cols = auto_detect_membership_columns(
-        tier_df=tier,
-        gene_key_col=args.gene_key_column,
-        include_regex=args.membership_include_regex,
-        exclude_regex=args.membership_exclude_regex,
-    )
-    logging.info("Detected %s membership columns in tier sheet", len(membership_cols))
-    if args.verbose and membership_cols:
-        logging.debug("Membership columns: %s", ", ".join(membership_cols))
+    # Create gene_id ONCE from args.gene_id_column (default: ensembl_gene_id)
+    if args.gene_id_column not in gene_master.columns:
+        logging.warning(
+            "Gene id column '%s' not found in Genes_Master; tractability merge will be skipped",
+            args.gene_id_column,
+        )
+        gene_master["gene_id"] = ""
+    else:
+        gene_master["gene_id"] = normalise_ensembl_gene_id(
+            gene_master[args.gene_id_column],
+            strip_version=bool(args.strip_ensembl_version),
+        )
+        n_nonempty = int((gene_master["gene_id"].astype(str).str.strip() != "").sum())
+        logging.info(
+            "Created 'gene_id' from Genes_Master column '%s' (non-empty: %s/%s)",
+            args.gene_id_column,
+            n_nonempty,
+            gene_master.shape[0],
+        )
 
-    # Merge
-    merged = gene_master.merge(
-        tier[[args.gene_key_column] + membership_cols],
-        on=args.gene_key_column,
-        how="left",
-    )
-
+    # Merge Open Targets tractability ONCE (optional)
     if args.tractability_tsv:
-        if "gene_id" not in merged.columns:
+        if (gene_master["gene_id"].astype(str).str.strip() == "").all():
             logging.warning(
-                "tractability_tsv provided but 'gene_id' is not available in merged table; "
-                "set --gene_id_column to a valid Ensembl id column (e.g. ensembl_gene_id)."
+                "tractability_tsv provided but 'gene_id' is empty for all rows; skipping tractability merge"
             )
         else:
             logging.info("Loading tractability TSV: %s", args.tractability_tsv)
@@ -704,35 +703,79 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 tract["gene_id"],
                 strip_version=bool(args.strip_ensembl_version),
             )
-            merged["gene_id"] = normalise_ensembl_gene_id(
-                merged["gene_id"],
-                strip_version=bool(args.strip_ensembl_version),
-            )
 
-            keep = ["gene_id"]
-            for c in [
+            expected_ot = [
                 "ot_any_small_molecule_tractable",
                 "ot_any_antibody_tractable",
                 "ot_any_protac_tractable",
                 "ot_tractability_summary",
                 "ot_approved_symbol",
-            ]:
-                if c in tract.columns:
-                    keep.append(c)
+            ]
+            keep = ["gene_id"] + [c for c in expected_ot if c in tract.columns]
 
             if len(keep) == 1:
                 logging.warning(
-                    "No expected ot_* columns found in tractability TSV. Available columns: %s",
-                    ", ".join(list(tract.columns)[:50]),
+                    "No expected ot_* columns found in tractability TSV. First columns: %s",
+                    ", ".join([str(c) for c in list(tract.columns)[:30]]),
                 )
             else:
                 tract = tract[keep].drop_duplicates(subset=["gene_id"], keep="first")
-                merged = merged.merge(tract, on="gene_id", how="left")
-                logging.info("After merging tractability: %s rows, %s columns", merged.shape[0], merged.shape[1])
-    else:
-        logging.info("No tractability TSV provided; candidate_druggable_sperm_protein may be empty.")
+                gene_master = gene_master.merge(tract, on="gene_id", how="left")
 
-    # Fill missing membership cols with False-like empties
+                # Fill missing OT fields
+                for c in [
+                    "ot_any_small_molecule_tractable",
+                    "ot_any_antibody_tractable",
+                    "ot_any_protac_tractable",
+                ]:
+                    if c in gene_master.columns:
+                        gene_master[c] = gene_master[c].fillna("False")
+                for c in ["ot_tractability_summary", "ot_approved_symbol"]:
+                    if c in gene_master.columns:
+                        gene_master[c] = gene_master[c].fillna("")
+
+                logging.info(
+                    "After tractability merge (Genes_Master): %s rows, %s columns",
+                    gene_master.shape[0],
+                    gene_master.shape[1],
+                )
+
+                if "ot_any_small_molecule_tractable" in gene_master.columns:
+                    counts = (
+                        gene_master["ot_any_small_molecule_tractable"]
+                        .astype(str)
+                        .str.strip()
+                        .str.lower()
+                        .value_counts()
+                        .head(10)
+                        .to_dict()
+                    )
+                    logging.info(
+                        "ot_any_small_molecule_tractable value counts (top 10): %s",
+                        counts,
+                    )
+    else:
+        logging.info("No tractability TSV provided; OT columns will be missing/False")
+
+    # Detect membership columns on tier sheet
+    membership_cols = auto_detect_membership_columns(
+        tier_df=tier,
+        gene_key_col=args.gene_key_column,
+        include_regex=args.membership_include_regex,
+        exclude_regex=args.membership_exclude_regex,
+    )
+    logging.info("Detected %s membership columns in tier sheet", len(membership_cols))
+    if args.verbose and membership_cols:
+        logging.debug("Membership columns: %s", ", ".join(membership_cols))
+
+    # Merge tier membership columns into gene_master
+    merged = gene_master.merge(
+        tier[[args.gene_key_column] + membership_cols],
+        on=args.gene_key_column,
+        how="left",
+    )
+
+    # Fill missing membership cols with False-like values
     for c in membership_cols:
         if c in merged.columns:
             merged[c] = merged[c].fillna("False")
@@ -750,6 +793,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         logging.info("No novelty exclude regex provided; novelty bonus will not be applied")
 
+    # Weights
     weights = Weights(
         per_membership_true=args.w_per_membership,
         proteomics_detected=args.w_prot_detected,
@@ -762,6 +806,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     logging.info("Scoring weights: %s", weights)
 
+    # Score
     scored = compute_priority_score(
         df=merged.rename(columns={args.gene_key_column: "gene_key"}),
         membership_cols=membership_cols,
@@ -775,9 +820,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Filter by minimum memberships
     before = scored.shape[0]
-    scored["n_memberships"] = pd.to_numeric(scored["n_memberships"], errors="coerce").fillna(0).astype(int)
+    scored["n_memberships"] = (
+        pd.to_numeric(scored["n_memberships"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
     ranked = scored[scored["n_memberships"] >= int(args.min_memberships)].copy()
-    logging.info("Filter min_memberships >= %s: %s -> %s rows", args.min_memberships, before, ranked.shape[0])
+    logging.info(
+        "Filter min_memberships >= %s: %s -> %s rows",
+        args.min_memberships,
+        before,
+        ranked.shape[0],
+    )
+
+    # Diagnostics
+    prot_counts_all = scored["prot_class"].value_counts(dropna=False).to_dict()
+    logging.info("Proteomics class counts (all scored genes): %s", prot_counts_all)
+
+    prot_counts_ranked = ranked["prot_class"].value_counts(dropna=False).to_dict()
+    logging.info("Proteomics class counts (ranked after filters): %s", prot_counts_ranked)
 
     if "ot_any_tractable" in ranked.columns:
         logging.info(
@@ -785,33 +846,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             int(ranked["ot_any_tractable"].astype(bool).sum()),
         )
     else:
-        logging.info("Tractability columns not present in workbook; ot_any_tractable will be False for all rows")
+        logging.info("ot_any_tractable not present; tractability will be False for all rows")
 
     # Sort with tie-breakers
-    ranked["prot_rank"] = ranked["prot_class"].map({"Strong": 2, "Detected": 1, "None": 0}).fillna(0).astype(int)
+    ranked["prot_rank"] = (
+        ranked["prot_class"].map({"Strong": 2, "Detected": 1, "None": 0}).fillna(0).astype(int)
+    )
     ranked["tract_rank"] = ranked.get("ot_any_tractable", False).astype(int)
-    ranked = ranked.sort_values(
-        by=["priority_score", "tract_rank", "prot_rank", "n_memberships", args.gene_key_column],
-        ascending=[False, False, False, False, True],
-    ).drop(columns=["prot_rank", "tract_rank"], errors="ignore")
 
-
-    prot_counts_all = scored["prot_class"].value_counts(dropna=False).to_dict()
-    logging.info("Proteomics class counts (all scored genes): %s", prot_counts_all)
-
-    prot_counts_ranked = ranked["prot_class"].value_counts(dropna=False).to_dict()
-    logging.info("Proteomics class counts (ranked after filters): %s", prot_counts_ranked)
-
+    ranked = (
+        ranked.sort_values(
+            by=["priority_score", "tract_rank", "prot_rank", "n_memberships", args.gene_key_column],
+            ascending=[False, False, False, False, True],
+        )
+        .drop(columns=["prot_rank", "tract_rank"], errors="ignore")
+    )
 
     # Candidate subset
     candidate = ranked[ranked["candidate_druggable_sperm_protein"].astype(bool)].copy()
 
-    # Optional topN
+    # Optional top N
     topn: Optional[pd.DataFrame] = None
     if int(args.top_n) > 0:
         topn = ranked.head(int(args.top_n)).copy()
 
-    # Column ordering (keep key fields at the front if present)
+    # Column ordering
     front = [
         args.gene_key_column,
         "gene_id",
