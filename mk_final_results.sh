@@ -82,12 +82,14 @@ python /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/Genomic_inte
   --verbose
 
 
+
 python ~/data/2026_sperm_Gates/PT_fertility_genomics/prioritise_druggable_sperm_targets.py \
-  --excel_in ~/data/2026_sperm_Gates/results/FULL_SUMMARY/SUMMARY_fertility_evidence.biochem.xlsx \
-    --gene_master_sheet Genes_Master \
-    --tier_sheet Tier_Summary_With_Omics \
+    --excel_in /home/pthorpe001/data/2026_sperm_Gates/results/FULL_SUMMARY/SUMMARY_fertility_evidence.biochem.xlsx \
     --tractability_tsv /home/pthorpe001/data/2026_sperm_Gates/genome_resources/gene_context_features_universe_plus_tractability.tsv \
-    --out_prefix ~/data/2026_sperm_Gates/results/FULL_SUMMARY/sperm_target_priorities_from_master \
+    --tractability_gene_id_column gene_id \
+    --strip_ensembl_version \
     --min_memberships 2 \
     --top_n 100 \
+    --out_prefix /home/pthorpe001/data/2026_sperm_Gates/results/FULL_SUMMARY/sperm_target_priorities_from_master \
     --verbose
+

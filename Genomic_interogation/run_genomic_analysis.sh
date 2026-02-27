@@ -35,3 +35,13 @@ python ${script_dir}/matched_set_enrichment.py \
   --n_gc_bins 10 \
   --out_prefix sperm_vs_null
 
+
+# add Open Targets tractability annotations to the gene universe file
+  python /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/Genomic_interogation/annotate_opentargets_tractability.py \
+  --in_tsv ~/data/2026_sperm_Gates/genome_resources/gene_context_features_universe.tsv \
+  --ensembl_column gene_id \
+  --out_tsv ~/data/2026_sperm_Gates/genome_resources/gene_context_features_universe_plus_tractability.tsv \
+  --verbose
+
+
+

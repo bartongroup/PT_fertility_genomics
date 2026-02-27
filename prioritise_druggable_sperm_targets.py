@@ -587,6 +587,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default="ensembl_gene_id",
         help="Ensembl gene id column in Genes_Master (e.g. ensembl_gene_id).",
     )
+    p.add_argument(
+        "--require_testis_dominance",
+        action="store_true",
+        help="Require testis to be highest expressing tissue and enriched vs others."
+    )
 
     p.add_argument("--tractability_tsv", default="", help="Optional TSV containing Open Targets tractability fields.")
     p.add_argument("--tractability_gene_id_column", default="gene_id", help="Gene id column in tractability TSV.")
@@ -817,6 +822,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Restore canonical gene_key column name in outputs
     scored = scored.rename(columns={"gene_key": args.gene_key_column})
+
+
+    # --- Optional testis dominance filter ---
+    if args.require_testis_dominance:
+        required_cols = {"log2_fc_target_vs_max_non_target", "is_target_max_tissue"}
+        if required_cols.issubset(scored.columns):
+
+            before_dom = scored.shape[0]
+
+            log2fc = pd.to_numeric(
+                scored["log2_fc_target_vs_max_non_target"],
+                errors="coerce",
+            )
+            is_max = (
+                pd.to_numeric(scored["is_target_max_tissue"], errors="coerce")
+                .fillna(0)
+                >= 1
+            )
+
+            scored = scored[(log2fc > 0) & is_max].copy()
+
+            logging.info(
+                "Applied testis dominance filter (log2FC>0 & target is max tissue): %s -> %s rows",
+                before_dom,
+                scored.shape[0],
+            )
+        else:
+            missing = sorted(list(required_cols.difference(set(scored.columns))))
+            logging.warning(
+                "Dominance filter skipped — missing columns: %s",
+                ", ".join(missing),
+            )
 
     # Filter by minimum memberships
     before = scored.shape[0]
