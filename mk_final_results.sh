@@ -89,7 +89,8 @@ python ~/data/2026_sperm_Gates/PT_fertility_genomics/prioritise_druggable_sperm_
     --tractability_gene_id_column gene_id \
     --strip_ensembl_version \
     --min_memberships 2 \
-    --top_n 100 \
+    --require_testis_dominance \
+    --top_n 200 \
     --out_prefix /home/pthorpe001/data/2026_sperm_Gates/results/FULL_SUMMARY/sperm_target_priorities_from_master \
     --verbose
 

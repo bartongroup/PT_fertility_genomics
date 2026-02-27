@@ -592,6 +592,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Require testis to be highest expressing tissue and enriched vs others."
     )
+    p.add_argument(
+        "--write_strict_testis_only",
+        action="store_true",
+        help="If set, also write a strict testis-only subset output.",
+    )
+    p.add_argument("--strict_tau_min", type=float, default=0.99)
+    p.add_argument("--strict_log2fc_min", type=float, default=5.0)
 
     p.add_argument("--tractability_tsv", default="", help="Optional TSV containing Open Targets tractability fields.")
     p.add_argument("--tractability_gene_id_column", default="gene_id", help="Gene id column in tractability TSV.")
@@ -870,6 +877,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ranked.shape[0],
     )
 
+    # Optional strict testis-only subset (for separate output)
+    strict_testis: Optional[pd.DataFrame] = None
+    if args.write_strict_testis_only:
+        required = {"tau", "log2_fc_target_vs_max_non_target", "is_target_max_tissue"}
+        missing = [c for c in required if c not in ranked.columns]
+
+        if missing:
+            logging.warning(
+                "Strict testis-only output skipped; missing columns: %s",
+                ", ".join(missing),
+            )
+        else:
+            tau = pd.to_numeric(ranked["tau"], errors="coerce")
+            log2fc = pd.to_numeric(ranked["log2_fc_target_vs_max_non_target"], errors="coerce")
+            is_max = pd.to_numeric(ranked["is_target_max_tissue"], errors="coerce").fillna(0) >= 1
+
+            before_strict = ranked.shape[0]
+            strict_testis = ranked[
+                (tau >= float(args.strict_tau_min)) &
+                (log2fc >= float(args.strict_log2fc_min)) &
+                (is_max)
+            ].copy()
+
+            logging.info(
+                "Strict testis-only subset (tau>=%s, log2FC>=%s, is_target_max_tissue==1): %s -> %s rows",
+                args.strict_tau_min,
+                args.strict_log2fc_min,
+                before_strict,
+                strict_testis.shape[0],
+            )
+
     # Diagnostics
     prot_counts_all = scored["prot_class"].value_counts(dropna=False).to_dict()
     logging.info("Proteomics class counts (all scored genes): %s", prot_counts_all)
@@ -937,6 +975,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Write outputs
     write_outputs(out_prefix=out_prefix, ranked=ranked, candidate=candidate, topn=topn)
+
+    if strict_testis is not None:
+        strict_prefix = f"{out_prefix}__strict_testis_only"
+        strict_testis.to_csv(f"{strict_prefix}.tsv", sep="\t", index=False)
+
+        with pd.ExcelWriter(f"{strict_prefix}.xlsx", engine="openpyxl") as writer:
+            strict_testis.to_excel(writer, sheet_name="strict_testis_only", index=False)
+
+        logging.info("Wrote strict testis-only outputs: %s.(tsv|xlsx)", strict_prefix)
 
     elapsed = datetime.now() - start
     logging.info("Done. Elapsed time: %s", str(elapsed).split(".")[0])
