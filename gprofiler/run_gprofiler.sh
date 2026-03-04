@@ -1,32 +1,28 @@
 
 
-python run_gprofiler.py \
-  --excel /path/to/sperm_gene_sets.xlsx \
-  --out_dir /path/to/gprofiler_out \
-  --organism hsapiens
 
   # or a folder of tsv gene list
 
   conda activate R_stats
 
+python run_gprofiler.py \
+  --gene_list_tsv sperm_only_genes.tsv \
+  --out_dir gprofiler_out/sperm_only_genes \
+  --organism hsapiens \
+  --gene_column gene_key \
+  --single_set_name sperm_only_genes
 
 
 
 mkdir -p gprofiler_results
 
 for f in *.tsv; do
-    base=$(basename "$f" .tsv)
+  base=$(basename "$f" .tsv)
 
-    python - <<PY
-import pandas as pd
-df = pd.read_csv("$f", sep="\t")
-df.to_excel("${base}.xlsx", index=False)
-PY
-
-    python /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/gprofiler/run_gprofiler.py \
-        --excel "${base}.xlsx" \
-        --out_dir gprofiler_results/"$base" \
-        --organism hsapiens
-
-    rm "${base}.xlsx"
+  python /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/gprofiler/run_gprofiler.py \
+    --gene_list_tsv "$f" \
+    --out_dir "gprofiler_results/$base" \
+    --organism hsapiens \
+    --gene_column gene_key \
+    --single_set_name "$base"
 done
