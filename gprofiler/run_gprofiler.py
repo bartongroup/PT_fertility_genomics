@@ -148,6 +148,25 @@ suppressPackageStartupMessages(library(ggplot2))
 
 args <- commandArgs(trailingOnly = TRUE)
 
+make_sheet_name <- function(x, used) {
+  # Excel sheet name max length is 31
+  nm <- trimws(as.character(x))
+  nm <- gsub("[\\[\\]\\*\\?/\\\\:]", "_", nm)  # remove forbidden characters
+  nm <- gsub("\\s+", "_", nm)
+  nm <- substr(nm, 1, 31)
+  if (nchar(nm) == 0) nm <- "sheet"
+
+  base <- nm
+  i <- 1
+  while (nm %in% used) {
+    suffix <- paste0("_", i)
+    nm <- substr(base, 1, 31 - nchar(suffix))
+    nm <- paste0(nm, suffix)
+    i <- i + 1
+  }
+  return(nm)
+}
+
 get_arg_value <- function(flag, default_value = NULL) {
   idx <- which(args == flag)
   if (length(idx) == 0) {
@@ -326,9 +345,14 @@ run_one_set <- function(genes, set_name_raw, out_dir, organism, custom_bg) {
     row.names = FALSE
   )
 
+
   wb <- openxlsx::createWorkbook()
-  openxlsx::addWorksheet(wb, set_name_raw)
-  openxlsx::writeData(wb, set_name_raw, res_tbl)
+  used_sheets <- character(0)
+  sheet_nm <- make_sheet_name(set_name_raw, used_sheets)
+  used_sheets <- c(used_sheets, sheet_nm)
+
+  openxlsx::addWorksheet(wb, sheet_nm)
+  openxlsx::writeData(wb, sheet_nm, res_tbl)
   openxlsx::saveWorkbook(wb, out_xlsx, overwrite = TRUE)
 
   p <- tryCatch(
