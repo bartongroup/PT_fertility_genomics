@@ -7,6 +7,11 @@ python run_gprofiler.py \
 
   # or a folder of tsv gene list
 
+  conda activate R_stats
+
+
+
+
 mkdir -p gprofiler_results
 
 for f in *.tsv; do
