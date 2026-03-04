@@ -43,5 +43,29 @@ python ${script_dir}/matched_set_enrichment.py \
   --out_tsv ~/data/2026_sperm_Gates/genome_resources/gene_context_features_universe_plus_tractability.tsv \
   --verbose
 
+# This will run the enrichment analysis on the chr the genes are on and nearest nieghbours too. 
 
+ python split_gene_lists_wide_to_tsv.py  --wide_tsv final_lists.txt --out_dir gene_lists_split
 
+for f in gene_lists_split/*_genes.tsv; do
+  base=$(basename "$f" _genes.tsv)
+  python genome_organisation_tests.py \
+    --features_tsv gene_context_features.tsv \
+    --target_gene_list_tsv "$f" \
+    --gene_key_column gene_key \
+    --out_prefix "genome_org_${base}" \
+    --n_permutations 10000 \
+    --n_length_bins 10 \
+    --match_on_gc \
+    --n_gc_bins 10
+done
+
+python genome_organisation_tests.py \
+  --features_tsv gene_context_features.tsv \
+  --target_gene_list_tsv sperm_genes.tsv \
+  --gene_key_column gene_key \
+  --out_prefix sperm_genes \
+  --n_permutations 10000 \
+  --n_length_bins 10 \
+  --match_on_gc \
+  --n_gc_bins 10

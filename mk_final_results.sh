@@ -83,14 +83,19 @@ python /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/Genomic_inte
 
 
 
-python ~/data/2026_sperm_Gates/PT_fertility_genomics/prioritise_druggable_sperm_targets.py \
-    --excel_in /home/pthorpe001/data/2026_sperm_Gates/results/FULL_SUMMARY/SUMMARY_fertility_evidence.biochem.xlsx \
-    --tractability_tsv /home/pthorpe001/data/2026_sperm_Gates/genome_resources/gene_context_features_universe_plus_tractability.tsv \
-    --tractability_gene_id_column gene_id \
-    --strip_ensembl_version \
-    --min_memberships 2 \
-    --require_testis_dominance \
-    --top_n 200 \
-    --out_prefix /home/pthorpe001/data/2026_sperm_Gates/results/FULL_SUMMARY/sperm_target_priorities_from_master \
-    --verbose
+python ~/data/2026_sperm_Gates/PT_fertility_genomics/final_summary/prioritise_druggable_sperm_targets.py \
+  --excel_in /home/pthorpe001/data/2026_sperm_Gates/results/FULL_SUMMARY/SUMMARY_fertility_evidence.biochem.xlsx \
+  --gene_master_sheet Genes_Master \
+  --tier_sheet Tier_Summary_With_Omics \
+  --tractability_tsv /home/pthorpe001/data/2026_sperm_Gates/genome_resources/gene_context_features_universe_plus_tractability.tsv \
+  --tractability_gene_id_column gene_id \
+  --strip_ensembl_version \
+  --min_memberships 2 \
+  --require_testis_dominance \
+  --write_strict_testis_only \
+  --strict_tau_min 0.99 \
+  --strict_log2fc_min 5 \
+  --out_prefix /home/pthorpe001/data/2026_sperm_Gates/results/FULL_SUMMARY/sperm_target_priorities_from_master \
+  --verbose
+
 
