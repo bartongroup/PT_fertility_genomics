@@ -26,3 +26,7 @@ for f in *.tsv; do
     --gene_column gene_key \
     --single_set_name "$base"
 done
+
+
+
+:~/data/2026_sperm_Gates/results/FULL_SUMMARY>   python /home/pthorpe001/data/2026_sperm_Gates/PT_fertility_genomics/gprofiler/run_gprofiler.py  --excel SUMMARY_fertility_evidence_gene_lists_only.xlsx --out_dir final_GO_enrichment  --gene_column gene_key  --organism hsapiens

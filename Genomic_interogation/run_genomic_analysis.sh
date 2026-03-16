@@ -69,3 +69,31 @@ python genome_organisation_tests.py \
   --n_length_bins 10 \
   --match_on_gc \
   --n_gc_bins 10
+
+
+
+
+# create summary of significant results for nearest neighbour test
+  echo -e "gene_list\tn_targets\tn_permutations\tmatch_on_gc\tobserved_median_nn_bp\tobserved_mean_nn_bp\tp_median\tp_mean\tpattern_median" \
+  > significant_nearest_neighbour.tsv
+
+awk -F'\t' 'NR>1 && $9 < 0.05 {
+    name = FILENAME
+    gsub("genome_org_|\\.nearest_neighbour_summary.tsv","",name)
+
+    pattern = ($7 < $8) ? "clustered" : "dispersed"
+
+    print name "\t" $1 "\t" $2 "\t" $4 "\t" $7 "\t" $8 "\t" $9 "\t" $10 "\t" pattern
+}' genome_org_*.nearest_neighbour_summary.tsv >> significant_nearest_neighbour.tsv
+
+
+
+# Create summary of significant results for chromosome enrichment test
+echo -e "gene_list\tobserved_distance\tnull_mean_distance\tp_value\tpattern" > nearest_neighbour_significant.tsv
+
+awk -F'\t' 'NR>1 && $4 < 0.05 {
+    pattern = ($2 < $3) ? "clustered" : "dispersed"
+    name = FILENAME
+    gsub("genome_org_|\\.nearest_neighbour_summary.tsv","",name)
+    print name "\t" $2 "\t" $3 "\t" $4 "\t" pattern
+}' genome_org_*.nearest_neighbour_summary.tsv >> nearest_neighbour_significant.tsv
